@@ -14,3 +14,9 @@ coverage.xml
 # Reports
 report*.json
 test-results-*
+build_out/
+*.so
+*.log
+fusion_result.json
+benchmark_results/
+vllm_fl/_cann_ops_custom/
