@@ -202,6 +202,22 @@ static bool CheckInputOutputShape(const gert::TilingContext* context)
             OP_LOGE(context, "Output rstd shape invalid, last few dim is not equal to 1."),
             return false);
     }
+    // FIX(2026-09-11): beta 为可选输入，存在时其 shape 必须与 gamma 一致
+    const gert::StorageShape* beta_shape = context->GetOptionalInputShape(INPUT_BETA_INDEX);
+    if (beta_shape != nullptr) {
+        const size_t betaDimNum = beta_shape->GetStorageShape().GetDimNum();
+        OP_CHECK_IF(
+            betaDimNum != gammaDimNum,
+            OP_LOGE(context, "Input beta shape invalid, dim num is not equal gamma dim num."),
+            return false);
+        for (uint32_t i = 0; i < gammaDimNum; i++) {
+            OP_CHECK_IF(
+                beta_shape->GetStorageShape().GetDim(i) != gamma_shape->GetStorageShape().GetDim(i),
+                OP_LOGE(context, "Input beta shape invalid, beta shape is not equal gamma shape."),
+                return false);
+        }
+    }
+
     return true;
 }
 
@@ -350,10 +366,17 @@ static void SaveTilingData(
 
 static void SetWorkspaceSize(gert::TilingContext* context)
 {
-    constexpr size_t sysWorkspaceSize = 16 * 1024 * 1024;
-    constexpr size_t usrSize = 256;
+    // Official guidance (CANN "GetLibApiWorkSpaceSize" / "SetSysWorkSpace"): the system
+    // workspace size must be queried from the platform rather than hard-coded.
+    // On this platform the query returns 16777216 (16 MiB), i.e. the same value the
+    // previous hard-coded constant used, so this is a portability/clarity fix.
+    // The user part is 0: this kernel never calls GetUserWorkspace() and the kernel entry
+    // does not forward the workspace pointer, so no user workspace is required.
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    uint32_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
-    currentWorkspace[0] = usrSize + sysWorkspaceSize;
+    currentWorkspace[0] = sysWorkspaceSize;
+    OPS_LOG_I(context, "GetLibApiWorkSpaceSize() = %u bytes (user workspace unused)", sysWorkspaceSize);
 }
 
 static void LogTilingResults(
