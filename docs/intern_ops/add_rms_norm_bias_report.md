@@ -4,9 +4,14 @@
 > 目标模型：Qwen3.6 27B 与 35B-A3B（公共路径）｜ 参考：R5（算子工程）、R8（Python 接入补丁）
 > 状态：数据已填充，最后更新 **2026-09-15**（含管理员 4-Baseline 压测、graph 可用配置、
 > 异常用例与 beta 校验修复、35B 背靠背复测）
-> 代码：分支 `intern/dyq/add_rms_norm_bias`（基线 a3644b2），提交 `be09f89` + `e016bdd`
+> 代码：分支 `intern/dyq/add_rms_norm_bias`（基线 a3644b2），提交 `f633100` + `cd1d8f4`
 
 ---
+
+> **分支说明（2026-09-17）**：本报告对应的分支已 rebase 到项目组指定基线
+> （`Lntano061105/vllm-plugin-FL_shixi` 的 `main`，commit `6be3b62`）。
+> 算子本体在该基线中已存在，本人在算子侧的净改动为
+> `op_host/add_rms_norm_bias_tiling.cpp` 的 29 行；其余为框架接入、测试、性能脚本与文档。
 
 ## 1. 背景与目标
 
@@ -114,7 +119,7 @@ Qwen3.6 模型层（input_layernorm / post_attention_layernorm / final norm / q_
 用例 6/7 未拒绝，记为**已知宽松行为**：本算子接口按 aclnn 惯例以"末维归一化"解释输入，
 0 batch 与 1D 被视为退化合法输入，与参考实现口径一致，故不额外收紧校验（收紧会偏离参考语义）。
 
-**由异常用例驱动修复的缺陷（本次唯一的算子代码改动，提交 `e016bdd`）**
+**由异常用例驱动修复的缺陷（本次唯一的算子代码改动，提交 `cd1d8f4`）**
 
 - **现象**：beta 长度与 gamma 不一致（如 512 vs 3584）时被**静默接受**，输出错误结果
 - **根因**：`CheckInputOutputShape()` 已校验 x1/x2/y/x/gamma，**遗漏可选输入 beta**
@@ -430,7 +435,7 @@ ON 应 4（TP4 四进程）、OFF 应 0；不符则该轮作废。**下表所有
   Median TTFT 几乎相同（差异 0.2%）→ **对照组干净**
 - 两轮 ON 之间波动仅 0.8%（234.31 / 236.15），重复性良好
 - 证据：`/workspace/results/dyq/20260915_rmsnorm_perf_debug/ab35b_eager_summary.txt`
-  （含 `env_info.txt`：提交 `e016bdd`、CANN/driver 版本、npu-smi、完整命令）
+  （含 `env_info.txt`：提交 `cd1d8f4`、CANN/driver 版本、npu-smi、完整命令）
 
 **修正后的结论**：**9/10 的"ON 倒退"是节点争卡的假象，非算子问题。** 三重证据：
 1. 同条件背靠背复测中 ON 稳定领先约 4%；
