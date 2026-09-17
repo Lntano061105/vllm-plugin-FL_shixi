@@ -185,6 +185,8 @@ done
 | `aclnnXxx ... not in libopapi.so` | 未 source 自定义算子环境 | `source vllm_fl/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash` |
 | `ImportError: dynamic module does not define module export function (PyInit__C_ascend)` | `camem_allocator.cpp` 里的 PyInit 函数名与 extension 名不匹配 | 检查 `csrc/ascend/camem_allocator.cpp` 是否为 `PyInit__C_ascend` |
 | PTO 测试提示找不到 `pto-isa` | 子模块未初始化或路径错误 | `git submodule update --init --recursive csrc/ascend/third_party/pto-isa` |
+| `ImportError: libhccl.so: cannot open shared object file`（torch_npu 加载失败） | 未 source CANN 环境，动态链接器找不到运行时库 | 先 `source /usr/local/Ascend/ascend-toolkit/set_env.sh`，再 source 自定义算子 `set_env.bash`（MoE 单测脚本已内置自动补齐，可直接运行） |
+| `WARNING: LD_LIBRARY_PATH 未包含算子包 op_api/lib` | 未 source 自定义算子环境，或算子包安装在其它路径 | source `vllm_fl/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash`，或用 `VLLM_FL_CUSTOM_OPP=<path>` 指定 |
 
 ## 4. 测试脚本说明
 
@@ -196,3 +198,19 @@ done
 | `test_recurrent_gated_delta_rule.py` | `npu_recurrent_gated_delta_rule` | CANN framework |
 | `test_chunk_gated_delta_rule_fwd_h.py` | `chunk_gated_delta_rule_fwd_h` | CANN framework |
 | `test_pto_chunk_gdn.py` | PTO GDN megakernel | Bisheng PTO |
+| `test_moe_init_routing_custom.py` | `npu_moe_init_routing_custom` | CANN framework |
+
+### MoE Init Routing Custom 单测
+
+`test_moe_init_routing_custom.py` 覆盖 dropless gather / scatter 映射、
+CUMSUM / COUNT / KEY_VALUE 三种 expert_tokens_num_type、`expert_tokens_num_flag=False`
+的结构契约、Drop-Pad 容量截断（含 cap 边界）与 bf16 输入，共 9 个用例。
+脚本内置环境自检：CANN 运行时库与自定义算子包 op_api/lib 缺失时会自动补齐并重启自身，
+因此在仓库根目录直接执行即可，无需先 source：
+
+```bash
+python tests/custom_ops_tests/test_moe_init_routing_custom.py
+# moe_init_routing_custom test: 9/9 passed
+```
+
+真机记录：Ascend 910B3 / CANN 9.0.0，2026-09-17，9/9 通过。
