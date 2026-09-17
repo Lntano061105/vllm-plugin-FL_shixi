@@ -278,8 +278,9 @@ Count=30720 = 40 层 × 768 输出 token/层（与 config 的 40 层吻合）；
 
 ## 9. 代码分支与仓库
 
-- **分支**：`add-qwen3_6_ascendc_gdn_ops`（团队共享功能分支）
-- **仓库去向**：推个人 Gitee 私有仓库（不直接推官方 `flagos-ai/vllm-plugin-FL`），交作业时提供仓库地址 + 分支名
+- **分支**：`add-qwen3_6_ascendc_gdn_ops`
+- **Fork 仓库**：`github.com/YGOHERO/vllm-plugin-FL_shixi`
+- **PR 目标**：`github.com/Lntano061105/vllm-plugin-FL_shixi` 的 `main` 分支
 - **构建产物已从版本控制移除**：`build_out/`、`vllm_fl/_cann_ops_custom/`、`*.so`、`fusion_result.json`、`*.log`、`benchmark_results/` 均不入库（以 `.gitignore` 挡产物）
 
 ## 来源与改动范围（声明）
