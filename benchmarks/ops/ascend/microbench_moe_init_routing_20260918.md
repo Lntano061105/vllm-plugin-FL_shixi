@@ -2,9 +2,10 @@
 
 - 算子：`torch.ops._C_ascend.npu_moe_init_routing_custom`（源码 `csrc/ascend/moe/moe_init_routing_custom/`）
 - 环境：Ascend 910B3（npu:0）、CANN 9.0.0、torch 2.8.0+cpu / torch_npu 2.8.0.post2、Python 3.11.14
+- **环境口径说明**：本 microbench 在容器**系统基础环境**下采集（未进入升级 venv）——算子级计时只依赖 torch_npu 与已安装的 aclnn 算子包（`torch.ops._C_ascend.npu_moe_init_routing_custom`），不依赖 vllm 0.20.2。技术报告 2.3「升级环境（venv）」中记录的 torch 2.11.0 / vllm 0.20.2 是**模型级 Baseline 与 serve 验证**所用环境。两处 torch 版本号差异属**采集环境口径不同**，非数据冲突；引用本结果时请连同本说明一并引用。
 - 对应任务书：第 3 节「Microbenchmark：算子级平均时延 + P50/P90」
 - 采集日期：2026-09-18
-- 脚本：`benchmarks/ops/ascend/microbench_moe_init_routing.py`（随本次提交入库）
+- 脚本：`benchmarks/ops/ascend/microbench_moe_init_routing.py`（脚本 + 两轮原始 csv 已随提交 `74c72f8` 入库；本结果 md 于 2026-09-18 随 docs 覆盖提交入库）
 
 ## 1. 计时口径（答辩需明确）
 
@@ -62,6 +63,7 @@
 ## 5. 原始数据
 
 - `microbench_moe_init_routing_20260918.csv`（Run 1）
+- 脚本与两轮原始 csv 已随提交 `74c72f8` 入库；本结果 md 随 2026-09-18 docs 覆盖提交入库
 - `microbench_moe_init_routing_20260918_rep2.csv`（Run 2）
 
 ## 6. 本口径的局限（被追问时的统一应答）

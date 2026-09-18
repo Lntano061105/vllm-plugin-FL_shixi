@@ -49,4 +49,3 @@ bash build_aclnn.sh
 | cos | 余弦相似度，精度对齐指标 |
 | aclnn | Ascend CANN 算子库封装包 |
 | _C_ascend | Ascend 侧 C 扩展编译产物（.so） |
-*（内容由AI生成，仅供参考）*

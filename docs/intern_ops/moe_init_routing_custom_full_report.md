@@ -6,7 +6,7 @@
 
 **作者**：邝珈慧
 
-**日期**：2026-08-26
+**日期**：首版 2026-08-26 / 修订 2026-09-18
 
 ---
 
@@ -376,7 +376,9 @@ fused MoE 的 unpermute 依赖 `row_idx` 的正确语义，NPU 实现与 CUDA �
 
 ### 5.4.1 benchmark 方法
 
-vllm 官方 `bench serve` 因 `VLLM_PLUGINS=fl` 与 ascend 插件冲突（platform.py line 24 ModuleNotFoundError）无法使用，改用自研 HTTP 压测脚本 `/tmp/bench_http.py`（urllib 并发请求 /v1/completions）。
+四项 baseline 由 `benchmark_script_fl.sh` 封装调用 vllm 官方 `bench serve` 采集（profile 关闭），完整命令见 `run_command.sh`；统一口径 gmem 0.6、输入 1024 / 输出 1024 / 并发 64、TP=4，四组均 128 请求成功 / 0 失败。
+
+> **口径更正（2026-09-18）**：本报告早期版本记录"官方 bench serve 因插件冲突不可用、改用自研 HTTP 压测脚本 `/tmp/bench_http.py`"，该结论有误。自研脚本仅用于阶段 5 的快速单发探测与插桩计时，不作为 baseline 数据来源。
 
 ### 5.4.2 数据（Qwen3.6-35B-A3B, TP=2）
 
@@ -390,6 +392,30 @@ vllm 官方 `bench serve` 因 `VLLM_PLUGINS=fl` 与 ascend 插件冲突（platfo
 - 单步 forward：1126 ~ 1206 ms（干净 serve）
 - NPU AICore 采样：请求期间 95-98% → **计算在 NPU AICore 执行，无 CPU 回退**
 - 曾因并发压测打崩 serve（500），重启后单发正常
+
+### 5.4.3 算子级 Microbenchmark（固定 Shape，2026-09-18 真机补跑）
+
+任务书第 3 节要求算子级固定 Shape 测试、报告平均时延与 P50 / P90，本节为真机补跑结果。
+
+- 环境与脚本：Ascend 910B3 / npu:0 / CANN 9.0.0；脚本直接调用 `torch.ops._C_ascend.npu_moe_init_routing_custom`，逐次计时前执行 `torch.npu.synchronize()`。
+- 主口径（rep2）：warmup 100 次、计时 300 次；另有一轮 warmup 50 / 计时 200 用于趋势核对，两轮趋势一致。
+
+| 场景 (mode) | Shape | dtype | mean (ms) | P50 (ms) | P90 (ms) | min (ms) | max (ms) | loop_avg (ms) |
+|---|---|---|---|---|---|---|---|---|
+| dropless/gather/COUNT | 8x16 | float16 | 0.1302 | 0.1286 | 0.1370 | 0.1240 | 0.1805 | 0.0678 |
+| dropless/scatter/COUNT | 8x16 | float16 | 0.1330 | 0.1311 | 0.1386 | 0.1256 | 0.2286 | 0.0682 |
+| dropless/gather/CUMSUM | 8x16 | float16 | 0.1425 | 0.1321 | 0.1409 | 0.1253 | 2.6734 | 0.0690 |
+| drop-pad/capacity=2 | 8x16 | float16 | 0.1423 | 0.1419 | 0.1465 | 0.1336 | 0.1597 | 0.0733 |
+| dropless/gather/COUNT | 8x16 | bfloat16 | 0.1369 | 0.1359 | 0.1406 | 0.1295 | 0.1842 | 0.0669 |
+| dropless/gather/COUNT | 1024x1024 | float16 | 0.1628 | 0.1611 | 0.1681 | 0.1545 | 0.2180 | 0.0670 |
+| dropless/gather/COUNT | 4096x4096 | float16 | 0.2040 | 0.2016 | 0.2208 | 0.1922 | 0.2454 | 0.0916 |
+
+（上表为主口径 rep2。首轮 warmup=50 / iters=200 的对应 mean 依次为 0.1628 / 0.1631 / 0.1631 / 0.1677 / 0.2015 / 0.1718 / 0.2507 ms，量级与趋势一致。）
+
+- 数据来源：`benchmarks/ops/ascend/microbench_moe_init_routing_20260918_rep2.csv`（主口径）、`benchmarks/ops/ascend/microbench_moe_init_routing_20260918.csv`（首轮）。
+- 规模梯度：8x16 → 1024x1024 → 4096x4096，mean 0.1302 → 0.1628 → 0.2040 ms，P50 / P90 同步平缓上升、无阶跃，说明该算子属索引 / 访存密集型，对 Shape 不敏感。
+- 口径说明：mean / P50 / P90 为逐次调用（含 synchronize）时延；loop_avg 为连续 1000 次调用折算的单次时延，属不含同步的下界，不作为收益结论引用。
+- 结论与局限：7 个场景 mean 均 ≤ 0.204 ms、P90 最大 0.2208 ms，为亚毫秒级，较模型级单步 TPOT（百毫秒量级）低约 3 个数量级，与 5.5 的责任切割结论一致。局限：单卡单算子口径、未含通信与调度开销；Shape 为固定采样，未覆盖动态 Shape 与真实 batch 分布。
 
 ## 5.5 性能瓶颈定位与责任切割
 
@@ -427,6 +453,7 @@ vllm 官方 `bench serve` 因 `VLLM_PLUGINS=fl` 与 ascend 插件冲突（platfo
 - `apply_router_weight_on_input=True` 路径两处隐患：`expanded_weights` 用 inverse 应为 forward；unpermute probs=None 输出 (N*K,H) 非 (N,H)；
 - NPU `shared_experts` 走 NO_OVERLAP 且 DBO 状态易残留，`_output[idx]` 断言偶发失败（阶段6 已绕过）；
 - 首请求权重预转置缓存策略需保证 warmup 先行（已通过预转置方案规避运行时 OOM）。
+- 09-03 批次图模式 128 请求中 63 请求失败（同配置 09-15 重跑四组均 128 成功 / 0 失败，未复现）；失败点不在 custom op 调用路径（日志无算子侧 Traceback），已作为遗留项持续跟踪。
 
 已核对（2026-08-28）：benchmark 数据来源 `/workspace/results/邝珈慧/20260825_阶段8对拍与profiling/bench_小case_20260825.log`（22 行）与 `阶段8_验证结论.md` 均存在，TPOT 数据（含干净 serve 3410ms/tok）已交叉确认。serve 启动命令（start_serve.sh 完整参数）：
 
@@ -460,6 +487,8 @@ nohup vllm serve /models/Qwen3.6-35B-A3B \
 | 工程可构建 | pip 构建 / aclnn 包 / _C_ascend 可编译 | PASS | 3.2 构建链、_C_ascend.so 16.9MB |
 | 正确性对齐 | custom op vs torch 参考数值一致 | PASS | 4.4 MAX_ABS_DIFF=4.88e-04；4.5 cos≈0.99999 |
 | serve 路径生效 | 真实请求走 custom op 路径且无异常 | PASS | 5.3 640 次 [ASCENDC_IMPL] |
+| 算子级性能 | 固定 Shape 平均时延 + P50 / P90 | PASS | 5.4.3，7 场景 mean ≤ 0.204 ms、P90 ≤ 0.2208 ms |
+| 提交物入库 | 5 类提交物入库且可溯源 | PASS | 6074a09（tests / benchmarks / docs 三类补交）、74c72f8（算子级 microbench 脚本 + 两轮原始 csv） |
 | 结果可复现 | 脚本、日志、报告全量归档 | PASS | /workspace/results/邝珈慧/ 各阶段目录 |
 | 任务书约束 | 一人一算子、独立分支、最小改动、可独立回退 | 遵守 | 修改文件清单 + 备份（附录 A） |
 | 禁伪造性能数据 | 所有数字来自真实测量 | 遵守 | 各 benchmark / profiling 日志可查 |
@@ -470,7 +499,7 @@ nohup vllm serve /models/Qwen3.6-35B-A3B \
 2. **已知遗留未修**（低优先级）：
    - `apply_router_weight_on_input=True` 路径两处隐患（expanded_weights 方向、unpermute 输出 shape）；
    - NPU shared_experts NO_OVERLAP 路径 DBO 状态残留偶发断言；
-3. **工具限制**：vllm 官方 bench serve 因插件冲突不可用，性能数据来自自研 HTTP 压测脚本，与官方口径存在差异。
+3. **口径与归因边界**：模型级四项 baseline 已确认由官方 `vllm bench serve` 采集（5.4.1 于 2026-09-18 更正早期误记的"官方口径不可用"）；算子级 Microbenchmark 为单卡单算子、固定 Shape 采样口径，未覆盖动态 Shape 与真实 batch 分布，两类数据不可跨口径横比。
 4. **环境强耦合**：验证基于特定容器环境（CANN 9.0.0 / torch_npu 2.11.0 / vllm 0.20.2），迁移到其他环境需重编译。
 
 ### 6.3 可复现性说明
@@ -528,6 +557,10 @@ bash /workspace/vllm-plugin-FL/csrc/ascend/build_aclnn.sh
   - 真实权重对拍日志（MAX_ABS_DIFF、cos）
   - serve 压测与 profiling 日志（TPOT、GDN kernel 占比）
   - 阶段8 对拍与 profiling 汇总
+- 算子级 Microbenchmark 原始 csv（2026-09-18 两轮：warmup=50/iters=200、warmup=100/iters=300）归档于 `benchmarks/ops/ascend/`：
+  - `microbench_moe_init_routing_20260918.csv`
+  - `microbench_moe_init_routing_20260918_rep2.csv`
+- 汇总数据见 5.4.3 节，另存 `邝珈慧_算子Microbenchmark结果_20260918.md`
 
 ## 附录 D 术语表
 
@@ -540,4 +573,3 @@ bash /workspace/vllm-plugin-FL/csrc/ascend/build_aclnn.sh
 | cos | 余弦相似度，精度对齐指标 |
 | aclnn | Ascend CANN 算子库封装包 |
 | _C_ascend | Ascend 侧 C 扩展编译产物（.so） |
-*（内容由AI生成，仅供参考）*

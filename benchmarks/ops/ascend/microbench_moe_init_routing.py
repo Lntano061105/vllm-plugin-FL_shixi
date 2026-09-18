@@ -17,7 +17,7 @@
 用法（仓库根目录，无需手动 source，脚本自检环境）：
 
     python benchmarks/ops/ascend/microbench_moe_init_routing.py
-    python benchmarks/ops/ascend/microbench_moe_init_routing_custom.py --iters 500 --warmup 100
+    python benchmarks/ops/ascend/microbench_moe_init_routing.py --iters 500 --warmup 100
 
     # 等价的手动环境准备：
     #   source /usr/local/Ascend/ascend-toolkit/set_env.sh
