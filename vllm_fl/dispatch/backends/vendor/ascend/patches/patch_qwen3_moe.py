@@ -1,52 +1,106 @@
-import torch
+# Copyright (c) 2026 BAAI. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Patch Qwen3 MoE routing to use the AscendC MoE Gating Top-K operator.
+#
+# Original vLLM FusedMoE.select_experts computes topk_weights / topk_ids
+# with the pure-PyTorch fused_topk.  This patch replaces that step with
+# torch.ops._C_ascend.moe_gating_top_k for the default (non-EPLB,
+# non-grouped, no-bias) routing path, which is what Qwen3 MoE uses.
+#
+# Falls back to the original implementation if the CANN operator is
+# unavailable or fails at runtime.
+
+import glob
 import logging
+import os
 from functools import wraps
+
+import torch
 
 logger = logging.getLogger(__name__)
 
-# 加载你的算子
-torch.ops.load_library('/workspace/vllm-plugin-FL/vllm_fl/_C_ascend.cpython-311-aarch64-linux-gnu.so')
+
+def _load_ascend_op_library():
+    """Load the _C_ascend torch extension from the vllm_fl package.
+
+    The path is discovered from the installed ``vllm_fl`` package instead
+    of a hard-coded workspace location, so the patch works after any
+    standard installation (pip install, wheel, editable).
+    """
+    import vllm_fl
+
+    vllm_fl_dir = os.path.dirname(os.path.abspath(vllm_fl.__file__))
+    so_files = glob.glob(os.path.join(vllm_fl_dir, "_C_ascend*.so"))
+    if not so_files:
+        raise RuntimeError(
+            f"_C_ascend*.so not found under {vllm_fl_dir}; "
+            "did the vllm_fl package build correctly?"
+        )
+    torch.ops.load_library(so_files[0])
+    logger.info("[MoePatch] Loaded Ascend op library: %s", so_files[0])
+
 
 def apply_patch():
-    """应用补丁，替换 Qwen3MoeSparseMoeBlock.forward"""
+    """Patch FusedMoE.select_experts to use AscendC moe_gating_top_k."""
     try:
-        from vllm.model_executor.models.qwen3_moe import Qwen3MoeSparseMoeBlock
-        original_forward = Qwen3MoeSparseMoeBlock.forward
+        _load_ascend_op_library()
 
-        @wraps(original_forward)
-        def patched_forward(self, hidden_states, **kwargs):
-            # 调用原始 gate 得到 router_logits
-            router_logits, _ = self.gate(hidden_states)
-            # 调用你的算子
-            if router_logits.dim() == 2:
-                num_tokens, num_experts = router_logits.shape
-                try:
-                    y, expert_idx, out = torch.ops._C_ascend.moe_gating_top_k(
-                        router_logits,
-                        k=2,  # 从配置读取？暂时固定
-                        k_group=1,
-                        group_count=1,
-                        group_select_mode=0,
-                        renorm=0,
-                        norm_type=0,
-                        out_flag=True,
-                        routed_scaling_factor=1.0,
-                        eps=1e-20
-                    )
-                    logger.info(f"[MoePatch] 调用 moe_gating_top_k 成功，y shape: {y.shape}, expert_idx shape: {expert_idx.shape}")
-                    # 继续调用原始 forward（但避免重复调用 gate）
-                    # 这里直接调用 self.experts 并传入 router_logits
-                    final_hidden_states = self.experts(hidden_states, router_logits)
-                    return final_hidden_states
-                except Exception as e:
-                    logger.warning(f"[MoePatch] 调用 moe_gating_top_k 失败: {e}, 回退到原始 forward")
-                    return original_forward(self, hidden_states, **kwargs)
-            else:
-                return original_forward(self, hidden_states, **kwargs)
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
-        Qwen3MoeSparseMoeBlock.forward = patched_forward
-        logger.info("[MoePatch] 补丁已应用，Qwen3MoeSparseMoeBlock.forward 被替换")
+        original_select_experts = FusedMoE.select_experts
+
+        @wraps(original_select_experts)
+        def patched_select_experts(self, hidden_states, router_logits):
+            # Only substitute the plain fused_topk path. Grouped topk,
+            # EPLB, bias-corrected routing and custom routing functions
+            # keep using vLLM's own implementation.
+            can_use_ascendc = (
+                not self.enable_eplb
+                and not self.use_grouped_topk
+                and self.e_score_correction_bias is None
+                and self.custom_routing_function is None
+            )
+            if not can_use_ascendc:
+                return original_select_experts(self, hidden_states, router_logits)
+
+            try:
+                topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
+                    router_logits,
+                    k=self.top_k,
+                    k_group=1,
+                    group_count=1,
+                    group_select_mode=0,
+                    renorm=int(self.renormalize),
+                    norm_type=0,  # 0: softmax, 1: sigmoid
+                    out_flag=False,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                    eps=1e-20,
+                )
+                indices_type = self.quant_method.topk_indices_dtype
+                if indices_type is not None and topk_ids.dtype != indices_type:
+                    topk_ids = topk_ids.to(dtype=indices_type)
+
+                logger.debug(
+                    "[MoePatch] moe_gating_top_k used: weights=%s ids=%s",
+                    tuple(topk_weights.shape),
+                    tuple(topk_ids.shape),
+                )
+                return topk_weights, topk_ids, None
+            except Exception as e:
+                logger.warning(
+                    "[MoePatch] moe_gating_top_k failed (%s); "
+                    "falling back to vLLM fused_topk",
+                    e,
+                )
+                return original_select_experts(self, hidden_states, router_logits)
+
+        FusedMoE.select_experts = patched_select_experts
+        logger.info(
+            "[MoePatch] Patched FusedMoE.select_experts with AscendC "
+            "moe_gating_top_k"
+        )
         return True
     except Exception as e:
-        logger.error(f"[MoePatch] 应用补丁失败: {e}")
+        logger.error("[MoePatch] Failed to apply patch: %s", e)
         return False

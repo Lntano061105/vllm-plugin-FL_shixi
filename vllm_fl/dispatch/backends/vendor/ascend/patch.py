@@ -19,6 +19,8 @@ def apply_ascend_patches():
     patch_op_cls()
     patch_fused_moe()
     patch_qwen3_5_attention()
+    patch_qwen3_6_gdn()
+    patch_qwen3_moe()
     patch_qwen3_mtp()
     patch_graph()
     patch_npugraph_ex()
@@ -71,6 +73,26 @@ def patch_qwen3_5_attention():
         logger.warning("Failed to patch Qwen3NextAttention for Ascend: %s", e)
 
 
+def patch_qwen3_6_gdn():
+    """Patch Qwen3.5/Qwen3.6 GatedDeltaNet and GemmaRMSNorm with AscendC ops.
+
+    Falls back to the existing Triton path when the CANN custom-op package
+    is not available at runtime.
+    """
+    try:
+        from .patches.patch_qwen3_6_gdn import patch_qwen3_6_gdn as _do_patch
+
+        _do_patch()
+    except Exception as e:
+        logger.warning("Failed to patch Qwen3.6 GDN AscendC ops: %s", e)
+
+def patch_qwen3_moe():
+    """Patch Qwen3 MoE routing with AscendC MoE Gating Top-K."""
+    try:
+        from .patches.patch_qwen3_moe import apply_patch as _do_patch
+        _do_patch()
+    except Exception as e:
+        logger.warning("Failed to patch Qwen3 MoE:%s",e)
 def patch_qwen3_mtp():
     """Patch Qwen3.5/Qwen3.6 Multi-Token Prediction for Ascend."""
     try:
