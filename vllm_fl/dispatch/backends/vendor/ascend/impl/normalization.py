@@ -6,23 +6,23 @@ Ascend normalization operator implementations.
 
 from __future__ import annotations
 
-import os
 from typing import Optional, Union
 
 import torch
 
 
 def _custom_rmsnorm_enabled() -> bool:
-    """Whether the custom AddRmsNormBias operator may be used.
+    """Whether the custom fused AddRmsNormBias operator may be used.
 
-    Returns False when explicitly disabled via the environment switch, when the
-    compiled extension is unavailable, or when the operator is not registered.
+    Delegates to the framework patch module so that the disable switch and the
+    dependency checks (CANN custom-op run package, _C_ascend extension, required
+    op names) stay identical on both entry points. Returning True while the CANN
+    run package is missing would make the call fail at runtime.
     """
-    if os.environ.get("VLLM_FL_DISABLE_ASCENDC_RMSNORM", "0") == "1":
-        return False
     try:
-        import vllm_fl._C_ascend  # noqa: F401
-        return hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias")
+        from ..patches.patch_add_rms_norm_bias import _custom_ops_available
+
+        return _custom_ops_available()
     except Exception:
         return False
 
