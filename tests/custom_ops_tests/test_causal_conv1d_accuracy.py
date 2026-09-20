@@ -150,7 +150,8 @@ def test_cache_indices_padding_skip():
 
     xc, wc, bc = x.float().cpu(), wt.float().cpu(), bias.float().cpu()
     ref = torch.full((B, D), float('nan'))
-    ref_state = cs.float().cpu().clone()
+    ref_state = cc.clone()  # pre-kernel baseline: untouched lines must stay here
+    touched = set()
     for s in range(B):
         c = ci[s]
         if c == PAD or not (0 <= c < NCL):
@@ -162,12 +163,20 @@ def test_cache_indices_padding_skip():
         yv += bc
         ref[s] = yv
         ref_state[c] = hist[1:]
+        touched.add(c)
     mask = ~torch.isnan(ref)
     assert ((y.float().cpu() - ref).abs()[mask] < TOL).all()
     # skipped slots keep NaN
     assert torch.isnan(y.float().cpu()[2]).all()
     assert torch.isnan(y.float().cpu()[5]).all()
-    assert (cs.float().cpu() - ref_state).abs().max().item() < TOL
+    # untouched cache lines must be bit-identical to their pre-kernel value
+    cs_cpu = cs.float().cpu()
+    for c in range(NCL):
+        if c in touched:
+            continue
+        assert (cs_cpu[c] - cc[c]).abs().max().item() == 0.0, \
+            f"cache line {c} was modified but should not be"
+    assert (cs_cpu - ref_state).abs().max().item() < TOL
 
 
 def test_mtp_spec_shift():
@@ -188,7 +197,7 @@ def test_mtp_spec_shift():
 
     xc, wc, bc = x.float().cpu(), wt.float().cpu(), bias.float().cpu()
     ref = torch.zeros(B, L, D)
-    ref_state = cs.float().cpu().clone()
+    ref_state = cc.clone()  # pre-kernel baseline: unwritten tail must stay here
     for s in range(B):
         # stateTokenOffset, same clamp as kernel
         off = max(0, min(accepted[s] - 1, SL - (W - 1)))
@@ -205,6 +214,11 @@ def test_mtp_spec_shift():
         ref_state[s] = new
     assert (y.float().cpu() - ref).abs().max().item() < TOL
     assert (cs.float().cpu() - ref_state).abs().max().item() < TOL
+    # rows past 2+L are never written; they must stay bit-identical
+    tail = SL - (2 + L)
+    if tail > 0:
+        assert (cs.float().cpu()[:, 2 + L:] - cc[:, 2 + L:]).abs().max().item() == 0.0, \
+            "MTP tail rows were modified but should not be"
 
 
 if __name__ == "__main__":
