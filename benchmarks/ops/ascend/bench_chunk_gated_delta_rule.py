@@ -15,7 +15,8 @@ import statistics
 import time
 
 import torch
-import torch_npu
+import torch_npu  # noqa: F401  引入 npu 设备接口
+
 import vllm_fl._C_ascend  # noqa: F401  确保算子注册
 
 

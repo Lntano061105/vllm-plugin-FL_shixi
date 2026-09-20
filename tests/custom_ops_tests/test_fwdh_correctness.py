@@ -2,8 +2,9 @@
 覆盖：h_state 序列 / v_new / final_state，断言 cosine >= 0.99
 """
 import torch
-import torch_npu
-import vllm_fl._C_ascend
+import torch_npu  # noqa: F401  引入 npu 设备接口
+
+import vllm_fl._C_ascend  # noqa: F401  确保算子注册
 
 CHUNK_SIZE = 64
 
@@ -69,15 +70,18 @@ def run_case(B, Hg, HV, T, K, V):
     for c in range(min(NT + 1, h_npu.shape[2])):
         cos = cosine(h_npu[0, :, c], h_ref[c])
         print(f"  h_state[{c}] cos = {cos:.6f}")
-        if cos < 0.99: ok = False
+        if cos < 0.99:
+            ok = False
     for c in range(NT):
         t0, t1 = c * CHUNK_SIZE, (c+1) * CHUNK_SIZE
         cos = cosine(vn_npu[:, :, t0:t1], vn_ref[:, :, t0:t1])
         print(f"  v_new[{c}] cos = {cos:.6f}")
-        if cos < 0.99: ok = False
+        if cos < 0.99:
+            ok = False
     cos_fs = cosine(fs_npu, h_ref[NT])
     print(f"  final_state cos = {cos_fs:.6f}  (目标: h_ref[NT])")
-    if cos_fs < 0.99: ok = False
+    if cos_fs < 0.99:
+        ok = False
     print("  PASS" if ok else "  FAIL")
     return ok
 

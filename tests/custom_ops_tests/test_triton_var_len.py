@@ -1,8 +1,12 @@
 """变长序列验证 v2（全用例传 cu_seqlens，绕开 flag_gems i_t bug）"""
 import torch
-import torch_npu
-import vllm_fl._C_ascend
-from vllm_fl.dispatch.backends.vendor.ascend.impl.fla.chunk import chunk_gated_delta_rule as cgdr
+import torch_npu  # noqa: F401  引入 npu 设备接口
+
+import vllm_fl._C_ascend  # noqa: F401  确保算子注册
+from vllm_fl.dispatch.backends.vendor.ascend.impl.fla.chunk import (
+    chunk_gated_delta_rule as cgdr,
+)
+
 
 def cosine(a, b):
     a, b = a.cpu().flatten().double(), b.cpu().flatten().double()
@@ -11,6 +15,7 @@ def cosine(a, b):
     if a.norm() == 0 or b.norm() == 0:
         return 0.0
     return torch.nn.functional.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
+
 
 def main():
     dev = "npu"
@@ -27,7 +32,8 @@ def main():
     torch.npu.synchronize()
     expected_o = torch.tensor([[[[10.0, 20.0, 30.0]]]], dtype=torch.float32) / (2.0**0.5)
     expected_fs = torch.tensor([[[[10.0, 2.0], [20.0, 8.0], [30.0, 32.0]]]], dtype=torch.float32)
-    ca = cosine(o, expected_o); cb = cosine(fs, expected_fs)
+    ca = cosine(o, expected_o)
+    cb = cosine(fs, expected_fs)
     print(f"  o cos={ca:.6f}  final_state cos={cb:.6f}  (期望≈1.0)")
     ok_a = ca > 0.999 and cb > 0.999
     print("  用例A:", "PASS" if ok_a else "FAIL")
@@ -55,8 +61,10 @@ def main():
                    initial_state=init[1:2], output_final_state=True,
                    cu_seqlens=torch.tensor([0, L2], dtype=torch.long, device=dev))
     torch.npu.synchronize()
-    c1 = cosine(o_v[:, :L1], o1); c2 = cosine(o_v[:, L1:], o2)
-    c3 = cosine(fs_v[0], fs1[0]); c4 = cosine(fs_v[1], fs2[0])
+    c1 = cosine(o_v[:, :L1], o1)
+    c2 = cosine(o_v[:, L1:], o2)
+    c3 = cosine(fs_v[0], fs1[0])
+    c4 = cosine(fs_v[1], fs2[0])
     print(f"  seq0(L=5)  o cos={c1:.6f}  fs cos={c3:.6f}")
     print(f"  seq1(L=12) o cos={c2:.6f}  fs cos={c4:.6f}")
     ok_b = all(x > 0.99 for x in [c1, c2, c3, c4])
@@ -64,6 +72,7 @@ def main():
 
     print("=" * 30)
     print("变长验证全部通过" if (ok_a and ok_b) else "存在失败")
+
 
 if __name__ == "__main__":
     main()

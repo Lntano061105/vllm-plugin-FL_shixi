@@ -91,6 +91,60 @@ _REQUIRED_OPS = (
 )
 
 
+def _soc_is_ascend950():
+    """判断当前设备是否为 ascend950（唯一支持 FP32 state 的平台）。
+
+    查询失败时保守返回 False（按 ascend910b 处理，仅允许 bf16 state）。
+    """
+    names = []
+    try:
+        names.append(str(torch.npu.get_device_name(0)))
+    except Exception:
+        pass
+    if not names:
+        try:
+            import torch_npu  # noqa: F401
+
+            names.append(str(torch_npu.npu.get_device_name(0)))
+        except Exception:
+            pass
+    for name in names:
+        if "950" in name.lower():
+            return True
+    return False
+
+
+def _ascendc_chunk_gdn_supported(query, key, value, beta, initial_state, g):
+    """判断当前输入能否走 AscendC 完整版 chunk GDR 算子；返回 (是否可用, 原因)。
+
+    判据与算子侧原型定义 / tiling 的校验保持一致，任一条件不满足即回退 Triton 基线：
+      1) 算子已注册（未编译或 .so 未加载时 hasattr 为 False）
+      2) dtype 契约：query / key / value / beta 为 bf16；g（可选）为 fp32
+      3) 平台 x state dtype：ascend910b 仅支持 bf16 state，FP32 state 需 ascend950
+    """
+    try:
+        if not hasattr(torch.ops._C_ascend, "npu_chunk_gated_delta_rule"):
+            return False, "operator npu_chunk_gated_delta_rule not registered"
+    except Exception as exc:  # 扩展未加载等
+        return False, "op registration check failed: %s" % exc
+
+    if query.dtype != torch.bfloat16 or key.dtype != torch.bfloat16:
+        return False, "query/key dtype must be bf16, got %s/%s" % (query.dtype, key.dtype)
+    if value.dtype != torch.bfloat16 or beta.dtype != torch.bfloat16:
+        return False, "value/beta dtype must be bf16, got %s/%s" % (value.dtype, beta.dtype)
+    if g is not None and g.dtype != torch.float32:
+        return False, "g dtype must be fp32, got %s" % g.dtype
+
+    state_dtype = initial_state.dtype
+    if state_dtype not in (torch.bfloat16, torch.float32):
+        return False, "initial_state dtype unsupported: %s" % state_dtype
+    if state_dtype == torch.float32 and not _soc_is_ascend950():
+        return False, "fp32 state requires ascend950 (ascend910b supports bf16 only)"
+
+    return True, ""
+
+
+
 def _bootstrap_custom_op_env() -> bool:
     """Make the packaged CANN custom-op package discoverable at runtime.
 
@@ -436,6 +490,18 @@ class AscendCGatedDeltaNet(Qwen3NextGatedDeltaNet):
             use_aclnn = int(os.environ.get("VLLM_FL_USE_ACLNN_CHUNK_GDN", "1"))
             if os.environ.get("VLLM_FL_DISABLE_ASCENDC_GDN", "0") == "1":
                 use_aclnn = 0
+            if use_aclnn == 1:
+                # 可用性判断（PR 评审意见）：算子未注册、dtype 或平台不支持时回退 Triton 基线
+                _asc_ok, _asc_why = _ascendc_chunk_gdn_supported(
+                    query_non_spec, key_non_spec, value_non_spec, beta_non_spec,
+                    ssm_state[non_spec_state_indices_tensor], g_non_spec,
+                )
+                if not _asc_ok:
+                    logger.info(
+                        "AscendC chunk GDN unavailable (%s), fallback to Triton GDN path",
+                        _asc_why,
+                    )
+                    use_aclnn = 0
             if use_aclnn == 1:
                 # AscendC npu_chunk_gated_delta_rule: TND 布局 + 原生 (Dv,Dk) state + 逐长度
                 actual_seq_lengths = (
