@@ -22,3 +22,9 @@ benchmark_results/
 fusion_result.json
 test_concur_server_*.log
 test-results-*
+build_out/
+*.so
+*.log
+fusion_result.json
+benchmark_results/
+vllm_fl/_cann_ops_custom/
