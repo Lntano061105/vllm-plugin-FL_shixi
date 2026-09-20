@@ -13,6 +13,14 @@ coverage.xml
 
 # Reports
 report*.json
+
+# Local Ascend build and runtime artifacts
+csrc/ascend/build_out/
+vllm_fl/_cann_ops_custom/
+vllm_fl/*.so
+benchmark_results/
+fusion_result.json
+test_concur_server_*.log
 test-results-*
 build_out/
 *.so
