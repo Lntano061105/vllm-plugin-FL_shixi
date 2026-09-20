@@ -7,8 +7,8 @@
 | 构建 | CMakeLists.txt | 修复 csrc 构建排错项，新增 custom op 编译目标 | 恢复 CMakeLists.txt.bak.* |
 | 构建 | build_aclnn.sh | 修复构建脚本，接入 aclnn 包构建链 | 恢复 build_aclnn.sh.bak.* |
 | 构建 | _C_ascend 重编译 | 重新编译生成 _C_ascend.so（16.9MB） | 重跑构建链覆盖 |
-| 插件 | vllm_plugin_fl custom op 接入 | MoE Init Routing 自定义算子注册与调用路径 | git 独立分支回退 |
-| 插件 | serve 钩子 | 精度钩子（cos≈0.99999 验证）与 [ASCENDC_IMPL] 日志 | git 独立分支回退 |
+| 插件 | vllm_plugin_fl custom op 接入（早期开发阶段，非本次提交内容） | MoE Init Routing 自定义算子注册与调用路径 | git 独立分支回退 |
+| 插件 | serve 钩子（早期开发阶段，非本次提交内容） | 精度钩子（cos≈0.99999 验证）与 [ASCENDC_IMPL] 日志 | git 独立分支回退 |
 
 所有修改均位于主仓库独立分支，可一键回退；构建产物均有 .bak 备份。
 
@@ -25,8 +25,8 @@ cd /workspace/vllm-plugin-fl && pip install -e .
 bash build_aclnn.sh
 # 5. 运行正确性验证（CPU 参考 / NPU 冒烟 / 真实权重）
 #    脚本与预期输出见 /workspace/results/邝珈慧/ 对应日期目录
-# 6. 启动 serve 并触发 custom op 路径
-#    观察日志中的 [ASCENDC_IMPL] 计数与精度钩子输出
+# 6. 启动 serve（当前仓库模型侧仍为 routing_v2 路径）
+#    早期开发阶段曾在隔离环境以 serve 钩子观察 [ASCENDC_IMPL] 计数与精度输出，见 4.4/4.5 节（非本次提交内容）
 ```
 
 ## 附录 C 数据归档清单

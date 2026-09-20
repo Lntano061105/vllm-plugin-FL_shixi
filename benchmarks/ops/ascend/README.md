@@ -12,7 +12,7 @@ MoE Init Routing Custom intake baselines (Qwen3.6-27B / 35B-A3B, TP=4).
 | Python | 3.11.14 (`/usr/local/python3.11.14/bin/python3`) |
 | vLLM | 0.20.2, torch 2.11.0 |
 | Plugin | vllm-plugin-FL, built in-tree: `VLLM_VENDOR=ascend pip install -e . --no-build-isolation` |
-| Custom ops | `source vllm_fl/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash` before serving |
+| Custom ops | `source vllm_fl/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash` before serving (the directory is produced by the build/install step and is not committed; see `docs/intern_ops/build_and_install.md`) |
 
 ## Files
 
@@ -64,6 +64,10 @@ run, model, mode, case, successful/failed requests, Output/Total token
 throughput, Mean TTFT, Mean/Median TPOT, Mean ITL.
 
 ## Archived results (09-15 batch)
+
+> Scope note: these four baselines measure the **current repository implementation**
+> (`npu_moe_init_routing_v2` / `routing_v2` path). They are a reference baseline only,
+> not evidence that the custom op is wired into the model call chain.
 
 Cases `1024,1024,128`, concurrency 64, max-num-seqs 64, chunked prefill on,
 `--gmem 0.6`, graph = PIECEWISE.

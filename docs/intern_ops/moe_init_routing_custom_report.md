@@ -21,6 +21,13 @@
 展开后的 token、行索引映射（gather map）、每专家 token 数/累加量，支持
 Dropless / Drop-Pad 两种模式与 CUMSUM / COUNT / KEY_VALUE 三种计数类型。
 
+## 1.1 本次提交范围（2026-09-20）
+
+本次提交仅包含算子单元测试、基准脚本与文档，**未修改模型调用链**；仓库当前模型侧 MoE 路由仍为
+`torch_npu.npu_moe_init_routing_v2`（`routing_v2`）。因此：单测验证的是算子自身（直接调用
+`torch.ops._C_ascend.npu_moe_init_routing_custom`），模型级 baseline 是当前实现的性能基线，
+二者均不构成“模型已调用 custom op”的证明。
+
 ## 2. 环境与构建
 
 | 项 | 值 |
@@ -42,7 +49,10 @@ Dropless / Drop-Pad 两种模式与 CUMSUM / COUNT / KEY_VALUE 三种计数类�
 | 5 | 真机对拍阶段双重转置导致 59GB 显存申请失败 | 去掉冗余转置，改为按块拷贝 |
 | 6 | 运行时版本不匹配（编译期 / 运行期 CANN 版本） | 统一算子包环境脚本，运行时 `source set_env.bash` |
 
-## 3. 接入与生效验证
+## 3. 接入与生效验证（早期开发阶段记录，非本次提交内容）
+
+> 本节记录早期开发阶段的验证过程（隔离环境以 importlib 加载主仓库 `fused_moe.py`）；本次提交未修改模型调用链，
+> 当前模型侧仍走 `routing_v2`。
 
 - 算子经 `torch_binding.cpp` 注册为 `_C_ascend::npu_moe_init_routing_custom`，
   与 `vllm_fl/ops/custom_ops.py::register_oot_ops()` 的 OOT 注册机制对接；
@@ -64,6 +74,9 @@ Dropless / Drop-Pad 两种模式与 CUMSUM / COUNT / KEY_VALUE 三种计数类�
 token 展开 / 专家排序 / 索引恢复 / 计数四类校验点与 3 类边界用例。
 
 ## 5. 性能 Baseline
+
+> 口径：以下为**当前仓库实现（`routing_v2` 路径）**在官方 `vllm bench serve` 下的性能基线，
+> 用于横向参照，不是 custom op 接入模型后的收益。
 
 条件：Ascend 910B3 × 4（TP=4），cases `1024,1024,128`，concurrency 64，
 max-num-seqs 64，max-model-len 8192，gmem 0.6，chunked prefill 开启，graph 模式为 PIECEWISE。

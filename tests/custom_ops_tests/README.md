@@ -1,3 +1,6 @@
+> **范围说明（2026-09-20）**：本目录单测直接调用 `torch.ops._C_ascend.npu_moe_init_routing_custom` 验证**算子自身**
+> 正确性，不覆盖模型调用链（仓库当前模型侧仍走 `npu_moe_init_routing_v2` / `routing_v2`）。
+
 # vLLM-FL Ascend Custom Ops Tests
 
 本目录包含 `vllm-plugin-FL` 在 Ascend NPU 上的自定义算子连接测试。

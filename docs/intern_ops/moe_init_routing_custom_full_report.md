@@ -10,6 +10,20 @@
 
 ---
 
+> **提交边界声明（2026-09-20 修订）**
+>
+> 本次提交仅包含算子单元测试、基准脚本与文档，**未修改模型调用链**；仓库当前模型侧
+> MoE 路由仍为 `torch_npu.npu_moe_init_routing_v2`（`routing_v2` 路径，见
+> `vllm_fl/dispatch/backends/vendor/ascend/impl/fused_moe.py`）。据此，本报告口径限定如下：
+>
+> - 第 4 章算子级单测与参考实现对拍，验证的是**算子自身**，不代表模型已调用该 custom op；
+> - 第 4.4 / 4.5 节与第 5.2.3 / 5.3 节的 serve 内 custom op 路径记录，属**早期开发阶段的验证过程**
+>   （在隔离环境以 importlib 直接加载主仓库 `fused_moe.py` 的方式完成），**不属于本次提交内容**，
+>   不构成“模型调用链已切换到 custom op”的证据；
+> - 第 5.4 节模型级四项 baseline 是**当前实现（routing_v2 路径）**的性能基线，用于横向参照，
+>   不是 custom op 接入模型后的收益证明；
+> - 本次提交未做 NPU 实测（新增/修改内容为测试脚本、基准脚本与文档）。
+
 ## 目录
 
 1. 第 1 章 项目背景与目标
@@ -41,7 +55,7 @@ Ascend（昇腾）NPU 生态以 CANN（Compute Architecture for Neural Networks�
 
 1. **构建接入**：在 Ascend 910B 环境下可编译、可安装、可加载；
 2. **正确性对齐**：与纯 torch 参考路径数值一致；
-3. **框架集成**：在 vllm serve 运行期真实调用 custom op 路径；
+3. **框架集成**（早期开发阶段验证，非本次提交范围）：在 vllm serve 运行期真实调用 custom op 路径；
 4. **可复现交付**：脚本、日志、报告全量归档。
 
 ## 1.3 目标与验收标准
@@ -50,7 +64,7 @@ Ascend（昇腾）NPU 生态以 CANN（Compute Architecture for Neural Networks�
 |---|---|
 | 工程可构建 | pip install -e .、aclnn .run 包、_C_ascend 编译通过 |
 | 正确性对齐 | CPU golden / NPU 冒烟 / 真实权重对拍 / serve 精度钩子全通过 |
-| serve 路径生效 | 请求日志出现 custom op 执行标记，无异常 |
+| serve 路径生效（早期开发阶段，非本次提交内容） | 请求日志出现 custom op 执行标记，无异常 |
 | 结果可复现 | 全链路脚本与日志归档，可独立复现 |
 
 ## 1.4 任务约束
@@ -267,7 +281,7 @@ fused MoE 的 unpermute 依赖 `row_idx` 的正确语义，NPU 实现与 CUDA �
 
 `rowidx_契约验证与对拍报告.md`（/workspace/results/邝珈慧/20260818_框架集成验证/）。
 
-## 4.4 真实权重集成验证
+## 4.4 真实权重集成验证（早期开发阶段记录，非本次提交内容）
 
 ### 4.4.1 方案
 
@@ -289,7 +303,7 @@ fused MoE 的 unpermute 依赖 `row_idx` 的正确语义，NPU 实现与 CUDA �
 
 脚本：`/workspace/scripts/邝珈慧/real_weight_moe_verify.py`、`run_real_weight_verify.sh`；日志：`/workspace/results/邝珈慧/20260818_框架集成验证/real_weight_verify.log`。
 
-## 4.5 serve 内精度对拍（阶段8，VLLM_FL_VERIFY 钩子）
+## 4.5 serve 内精度对拍（阶段8，VLLM_FL_VERIFY 钩子；早期开发阶段记录，非本次提交内容）
 
 ### 4.5.1 方法
 
@@ -352,7 +366,10 @@ fused MoE 的 unpermute 依赖 `row_idx` 的正确语义，NPU 实现与 CUDA �
 - **现象**：serve 加载权重阶段发生双重转置，导致 ~59GB 物理内存超限 OOM。
 - **修复**：将 `convert_moe_weights_pretransposed` 改为 no-op（权重布局由 patch.py 统一预转置，见 5.2.4）。
 
-### 5.2.3 custom op 运行时接入
+### 5.2.3 custom op 运行时接入（早期开发阶段记录，非本次提交内容）
+
+> 说明：以下为早期开发阶段在隔离环境验证 custom op 路径时的修复记录。本次提交未修改模型调用链，
+> 仓库当前模型侧仍走 `routing_v2`。
 
 - **现象**：custom op 未接入运行时，serve 实际仍走原路径。
 - **修复**（`vllm_fl/dispatch/backends/vendor/ascend/impl/fused_moe.py`）：
@@ -365,14 +382,19 @@ fused MoE 的 unpermute 依赖 `row_idx` 的正确语义，NPU 实现与 CUDA �
 - **背景**：FL 的 `fused_experts_impl` 移植自 vLLM v0.11，假设 w1=[E,N,K]、w2=[E,K,N]；而 vLLM 0.20.x 实际传入 w1=[E,K,N]、w2=[E,N,K]，布局完全相反，曾报 `Hidden size mismatch 2048 != 512`。
 - **方案演进**：`_normalize_fl_weight_layout` 运行时按 hidden 判断并 `transpose(-1,-2).contiguous()` + 字典缓存（key 为 data_ptr）→ 阶段8 发现首请求逐层 OOM（缓存持有 40 层 × 768MB ≈ 30GB）→ 改为**权重加载阶段一次性预转置**（patch.py 的 pre-transposed layout），运行时 `need1/need2=False` 不再转置拷贝。
 
-## 5.3 集成验证结论
+## 5.3 集成验证结论（早期开发阶段记录，非本次提交内容）
 
 - 环境：Qwen3.6-35B-A3B，TP=2，NPU 6/7，vllm 0.20.2 venv，gpu-memory-utilization 0.65
 - 启动正常，curl 请求正常返回
 - 日志累计 640 次 `[ASCENDC_IMPL]`（custom op 路径真实执行），无 Traceback / assert
 - 双日志机制（`[FL_ASCENDC]` 路由入口 + `[ASCENDC_IMPL]` 实现入口，受 `VLLM_FL_DEBUG_SHAPE=1` 控制）确认路径打通
+- **边界**：上述为早期开发阶段（隔离环境 + importlib 加载主仓库 `fused_moe.py`）的记录；本次提交未修改模型调用链，
+  当前仓库模型侧仍为 `routing_v2`，不能据此认为模型已接入 custom op。
 
 ## 5.4 性能基准
+
+> 口径说明：本节四项模型级数据是在**当前仓库实现（`routing_v2` 路径）**下用官方 `vllm bench serve`
+> 采集的性能基线，用于横向参照；不代表 custom op 已接入模型，也不是其收益证明。
 
 ### 5.4.1 benchmark 方法
 
@@ -486,7 +508,7 @@ nohup vllm serve /models/Qwen3.6-35B-A3B \
 |---|---|---|---|
 | 工程可构建 | pip 构建 / aclnn 包 / _C_ascend 可编译 | PASS | 3.2 构建链、_C_ascend.so 16.9MB |
 | 正确性对齐 | custom op vs torch 参考数值一致 | PASS | 4.4 MAX_ABS_DIFF=4.88e-04；4.5 cos≈0.99999 |
-| serve 路径生效 | 真实请求走 custom op 路径且无异常 | PASS | 5.3 640 次 [ASCENDC_IMPL] |
+| serve 路径生效（早期开发阶段，非本次提交内容） | 真实请求走 custom op 路径且无异常 | 早期阶段 PASS | 5.3 640 次 [ASCENDC_IMPL]；本次提交未修改模型调用链，当前仍为 routing_v2 |
 | 算子级性能 | 固定 Shape 平均时延 + P50 / P90 | PASS | 5.4.3，7 场景 mean ≤ 0.204 ms、P90 ≤ 0.2208 ms |
 | 提交物入库 | 5 类提交物入库且可溯源 | PASS | 6074a09（tests / benchmarks / docs 三类补交）、74c72f8（算子级 microbench 脚本 + 两轮原始 csv） |
 | 结果可复现 | 脚本、日志、报告全量归档 | PASS | /workspace/results/邝珈慧/ 各阶段目录 |
@@ -501,6 +523,8 @@ nohup vllm serve /models/Qwen3.6-35B-A3B \
    - NPU shared_experts NO_OVERLAP 路径 DBO 状态残留偶发断言；
 3. **口径与归因边界**：模型级四项 baseline 已确认由官方 `vllm bench serve` 采集（5.4.1 于 2026-09-18 更正早期误记的"官方口径不可用"）；算子级 Microbenchmark 为单卡单算子、固定 Shape 采样口径，未覆盖动态 Shape 与真实 batch 分布，两类数据不可跨口径横比。
 4. **环境强耦合**：验证基于特定容器环境（CANN 9.0.0 / torch_npu 2.11.0 / vllm 0.20.2），迁移到其他环境需重编译。
+5. **提交边界与证据强度**：本次提交只包含测试、基准脚本与文档，未修改模型调用链；算子级单测只证明算子本身正确，
+   模型级 baseline 只反映当前实现（`routing_v2`）的性能，二者均不能作为“模型已调用 custom op”的证明。
 
 ### 6.3 可复现性说明
 

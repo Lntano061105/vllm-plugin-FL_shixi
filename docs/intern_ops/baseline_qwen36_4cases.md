@@ -1,3 +1,6 @@
+> **口径说明（2026-09-20）**：本节四项 baseline 为**当前仓库实现（`npu_moe_init_routing_v2` / `routing_v2` 路径）**
+> 在官方 `vllm bench serve` 下的性能数据；本次提交未修改模型调用链，该数据不表示 custom op 已接入模型。
+
 # Qwen3.6 27B / 35B 四项 Baseline 汇总（PIECEWISE）
 
 - 汇总时间：2026-09-15
