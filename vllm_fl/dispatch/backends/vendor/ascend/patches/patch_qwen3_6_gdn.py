@@ -430,31 +430,64 @@ class AscendCGatedDeltaNet(Qwen3NextGatedDeltaNet):
 
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            # Chunked prefill stays on the (Ascend Triton) chunk kernel, which
-            # uses the FLA (Hv, Dk, Dv) state layout: transpose at the boundary.
-            initial_state = (
-                ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
-            )
-            initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = _qwen3_next_lib.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
-                head_first=False,
-                use_qk_l2norm_in_kernel=True,
-            )
-            # Init cache
-            ssm_state[non_spec_state_indices_tensor] = (
-                last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-            )
+            # 开关控制（任务书 §3-R5：保留基线回退开关，参考官方 PR #12607）：
+            #   VLLM_FL_USE_ACLNN_CHUNK_GDN=1（默认）→ AscendC npu_chunk_gated_delta_rule
+            #   VLLM_FL_USE_ACLNN_CHUNK_GDN=0 或 VLLM_FL_DISABLE_ASCENDC_GDN=1 → 回退 Triton 基线
+            use_aclnn = int(os.environ.get("VLLM_FL_USE_ACLNN_CHUNK_GDN", "1"))
+            if os.environ.get("VLLM_FL_DISABLE_ASCENDC_GDN", "0") == "1":
+                use_aclnn = 0
+            if use_aclnn == 1:
+                # AscendC npu_chunk_gated_delta_rule: TND 布局 + 原生 (Dv,Dk) state + 逐长度
+                actual_seq_lengths = (
+                    non_spec_query_start_loc[1:] - non_spec_query_start_loc[:-1]
+                ).to(torch.int32)
+                # AscendC 算子内部不做 q/k L2 归一化，需外部先做
+                q_asc = l2norm_fwd(query_non_spec)
+                k_asc = l2norm_fwd(key_non_spec)
+                # 原生 (Dv,Dk) 布局，不转置；clone 后清零无初始 state 的序列
+                initial_state = ssm_state[non_spec_state_indices_tensor].clone()
+                initial_state[~has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = torch.ops._C_ascend.npu_chunk_gated_delta_rule(
+                    q_asc.squeeze(0),
+                    k_asc.squeeze(0),
+                    value_non_spec.squeeze(0),
+                    beta_non_spec.squeeze(0),
+                    initial_state,
+                    actual_seq_lengths,
+                    g=g_non_spec.squeeze(0),
+                    scale_value=key_non_spec.shape[-1] ** -0.5,
+                )
+                core_attn_out_non_spec = core_attn_out_non_spec.unsqueeze(0)
+                # Init cache（AscendC 输出原生 (Dv,Dk) 布局，不转置）
+                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
+            else:
+                # Triton 回退（基线 chunk_gated_delta_rule，FLA (Hv,Dk,Dv) 布局，边界转置）
+                initial_state = (
+                    ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
+                )
+                initial_state[~has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = _qwen3_next_lib.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc,
+                    head_first=False,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                # Init cache（Triton 输出 FLA (Hv,Dk,Dv)，写回需转置）
+                ssm_state[non_spec_state_indices_tensor] = (
+                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = _build_actual_seq_lengths(
                 non_spec_query_start_loc, attn_metadata.num_decodes
