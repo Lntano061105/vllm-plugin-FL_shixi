@@ -1,0 +1,8 @@
+scene,shape,dtype,mode,warmup,iters,mean_ms,p50_ms,p90_ms,min_ms,max_ms,loop_avg_ms
+dropless_gather,8x16,float16,dropless/gather/COUNT,50,200,0.1628,0.1587,0.1732,0.1517,0.2360,0.0913
+dropless_scatter,8x16,float16,dropless/scatter/COUNT,50,200,0.1631,0.1582,0.1758,0.1513,0.2234,0.0911
+dropless_cumsum,8x16,float16,dropless/gather/CUMSUM,50,200,0.1631,0.1586,0.1722,0.1514,0.2407,0.0850
+drop_pad_cap2,8x16,float16,drop-pad/capacity=2,50,200,0.1677,0.1643,0.1804,0.1549,0.2184,0.0843
+dropless_gather_bf16,8x16,bfloat16,dropless/gather/COUNT,50,200,0.2015,0.1573,0.1804,0.1403,7.5822,0.0874
+dropless_gather_1024x1024,1024x1024,float16,dropless/gather/COUNT,50,200,0.1718,0.1655,0.1953,0.1591,0.4141,0.0814
+dropless_gather_4096x4096,4096x4096,float16,dropless/gather/COUNT,50,200,0.2507,0.2448,0.2622,0.2320,0.6644,0.0922
