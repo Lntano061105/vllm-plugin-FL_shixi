@@ -3,13 +3,11 @@
 #
 # Patch Qwen3 MoE routing to use the AscendC MoE Gating Top-K operator.
 #
-# Original vLLM FusedMoE.select_experts computes topk_weights / topk_ids
-# with the pure-PyTorch fused_topk.  This patch replaces that step with
-# torch.ops._C_ascend.moe_gating_top_k for the default (non-EPLB,
-# non-grouped, no-bias) routing path, which is what Qwen3 MoE uses.
-#
-# Falls back to the original implementation if the CANN operator is
-# unavailable or fails at runtime.
+# The vllm_fl plugin defines FusedMoEFL (a subclass of vLLM's FusedMoE)
+# with its own select_experts method.  Patching FusedMoE alone has no
+# effect because the subclass does not dispatch to the parent method.
+# This patch therefore targets FusedMoEFL when available, and falls back
+# to FusedMoE otherwise.
 
 import glob
 import logging
@@ -22,12 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _load_ascend_op_library():
-    """Load the _C_ascend torch extension from the vllm_fl package.
-
-    The path is discovered from the installed ``vllm_fl`` package instead
-    of a hard-coded workspace location, so the patch works after any
-    standard installation (pip install, wheel, editable).
-    """
+    """Load the _C_ascend torch extension from the vllm_fl package."""
     import vllm_fl
 
     vllm_fl_dir = os.path.dirname(os.path.abspath(vllm_fl.__file__))
@@ -41,20 +34,38 @@ def _load_ascend_op_library():
     logger.info("[MoePatch] Loaded Ascend op library: %s", so_files[0])
 
 
-def apply_patch():
-    """Patch FusedMoE.select_experts to use AscendC moe_gating_top_k."""
-    try:
-        _load_ascend_op_library()
 
+def _resolve_target_cls():
+    """Return the FusedMoE subclass actually used by the model.
+
+    The vllm_fl plugin registers FusedMoEFL and the model instantiates
+    that subclass, so its own select_experts wins over the parent's.
+    """
+    try:
+        from vllm_fl.ops.fused_moe.layer import FusedMoEFL
+
+        logger.info("[MoePatch] Using FusedMoEFL from vllm_fl")
+        return FusedMoEFL
+    except ImportError:
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
-        original_select_experts = FusedMoE.select_experts
+        logger.info("[MoePatch] FusedMoEFL not found, using FusedMoE")
+        return FusedMoE
+
+
+def apply_patch():
+    """Patch the FusedMoE subclass used by the model with AscendC Top-K."""
+    try:
+        _load_ascend_op_library()
+        target_cls = _resolve_target_cls()
+
+        original_select_experts = target_cls.select_experts
 
         @wraps(original_select_experts)
         def patched_select_experts(self, hidden_states, router_logits):
             # Only substitute the plain fused_topk path. Grouped topk,
             # EPLB, bias-corrected routing and custom routing functions
-            # keep using vLLM's own implementation.
+            # keep using the original implementation.
             can_use_ascendc = (
                 not self.enable_eplb
                 and not self.use_grouped_topk
@@ -90,15 +101,15 @@ def apply_patch():
             except Exception as e:
                 logger.warning(
                     "[MoePatch] moe_gating_top_k failed (%s); "
-                    "falling back to vLLM fused_topk",
+                    "falling back to original select_experts",
                     e,
                 )
                 return original_select_experts(self, hidden_states, router_logits)
 
-        FusedMoE.select_experts = patched_select_experts
+        target_cls.select_experts = patched_select_experts
         logger.info(
-            "[MoePatch] Patched FusedMoE.select_experts with AscendC "
-            "moe_gating_top_k"
+            "[MoePatch] Patched %s.select_experts with AscendC moe_gating_top_k",
+            target_cls.__name__,
         )
         return True
     except Exception as e:
