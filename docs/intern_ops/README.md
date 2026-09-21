@@ -38,10 +38,13 @@
 ## 复现入口
 
 ```bash
-# 单测（需先 source set_env.bash；该脚本由构建/安装步骤产生）
-python3 tests/custom_ops_tests/test_moe_init_routing_custom.py
+# 解释器统一使用装有 torch_npu / vLLM 的 venv（容器默认 python3 为 3.10.12，无 torch_npu）
+PY=/workspace/venvs/vllm0202/bin/python
+
+# 单测（需先 source CANN 环境与 set_env.bash，见 build_and_install.md 第 5/6 节）
+$PY tests/custom_ops_tests/test_moe_init_routing_custom.py
 
 # 四项 baseline
 bash benchmarks/ops/ascend/run_command.sh
-python3 benchmarks/ops/ascend/analysis.py --result-root /workspace/results
+$PY benchmarks/ops/ascend/analysis.py --result-root /workspace/results
 ```

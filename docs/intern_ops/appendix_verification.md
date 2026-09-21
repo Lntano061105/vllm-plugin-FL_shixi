@@ -19,10 +19,10 @@
 ssh -p 3228 root@127.0.0.1
 # 2. 激活独立 venv（vllm 0.20.2 / torch_npu 2.11.0 / CANN 9.0.0）
 source /workspace/venvs/vllm0202/bin/activate
-# 3. 进入插件仓库，安装 editable 模式
-cd /workspace/vllm-plugin-fl && pip install -e .
-# 4. 构建 aclnn 包
-bash build_aclnn.sh
+# 3. 进入插件仓库，安装 editable 模式（需已 source CANN 环境）
+cd <repo_root> && VLLM_VENDOR=ascend pip install -e . --no-build-isolation
+# 4. 构建 aclnn 包（脚本位于 csrc/ascend/，末尾自动安装到 vllm_fl/_cann_ops_custom）
+bash csrc/ascend/build_aclnn.sh
 # 5. 运行正确性验证（CPU 参考 / NPU 冒烟 / 真实权重）
 #    脚本与预期输出见 /workspace/results/邝珈慧/ 对应日期目录
 # 6. 启动 serve（当前仓库模型侧仍为 routing_v2 路径）
