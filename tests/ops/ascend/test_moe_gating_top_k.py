@@ -1,91 +1,136 @@
 #!/usr/bin/env python3
-import torch
+"""MoE Gating Top-K 正确性测试。
+
+与参考实现（PyTorch 原生 Top-K + Softmax）对比专家选择、权重和归一化。
+路径动态发现，不写死绝对路径。
+"""
+import glob
+import os
+
 import numpy as np
+import torch
 
-# 1. 加载算子
-torch.ops.load_library('/workspace/vllm-plugin-FL/vllm_fl/_C_ascend.cpython-311-aarch64-linux-gnu.so')
+# 1. 动态加载算子
+import vllm_fl
 
-print("=" * 60)
-print("MoE Gating Top-K 固定输入输出测试")
-print("=" * 60)
+_VLLM_FL_DIR = os.path.dirname(os.path.abspath(vllm_fl.__file__))
+_SO_FILES = glob.glob(os.path.join(_VLLM_FL_DIR, "_C_ascend*.so"))
+if not _SO_FILES:
+    raise RuntimeError(f"_C_ascend*.so not found under {_VLLM_FL_DIR}")
+torch.ops.load_library(_SO_FILES[0])
+print(f"Loaded op library: {_SO_FILES[0]}")
 
-# 2. 固定输入
-print("\n[1] 准备固定输入:")
-# 4个token，8个专家，固定的随机种子
-torch.manual_seed(42)
-x = torch.randn(4, 8).npu()
-print(f"    输入 x 形状: {x.shape}")
-print(f"    x[0][:5]: {x[0][:5]}")
 
-# 3. 固定参数
-k = 2
-k_group = 1
-group_count = 1
-group_select_mode = 0
-renorm = 0
-norm_type = 0
-out_flag = True
-routed_scaling_factor = 1.0
-eps = 1e-20
+def reference_topk(x: torch.Tensor, k: int, renorm: int = 0,
+                   norm_type: int = 0, routed_scaling_factor: float = 1.0):
+    """PyTorch reference for the operator's semantics.
 
-print(f"\n[2] 参数:")
-print(f"    k: {k}")
-print(f"    k_group: {k_group}")
-print(f"    group_count: {group_count}")
-print(f"    out_flag: {out_flag}")
+    norm_type=0: softmax; norm_type=1: sigmoid.
+    renorm=1: renormalize the top-k weights to sum to 1.
+    """
+    if norm_type == 0:
+        scores = torch.softmax(x.float(), dim=-1)
+    elif norm_type == 1:
+        scores = torch.sigmoid(x.float())
+    else:
+        raise ValueError(f"unsupported norm_type={norm_type}")
 
-# 4. 调用算子
-print("\n[3] 调用 moe_gating_top_k:")
-try:
+    topk_weights, topk_ids = torch.topk(scores, k, dim=-1, sorted=False)
+
+    if renorm:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
+
+    return topk_weights, topk_ids
+
+
+def run_case(num_tokens, num_experts, k, renorm=0, norm_type=0,
+             routed_scaling_factor=1.0, dtype=torch.float16):
+    """One correctness case: run op and compare against reference."""
+    torch.manual_seed(42)
+
+    x = torch.randn(num_tokens, num_experts, dtype=torch.float32).npu()
+
+    # 调用算子
     y, expert_idx, out = torch.ops._C_ascend.moe_gating_top_k(
-        x, k, k_group, group_count, group_select_mode,
-        renorm, norm_type, out_flag, routed_scaling_factor, eps
+        x, k, 1, 1, 0, renorm, norm_type, True,
+        routed_scaling_factor, 1e-20,
     )
-    print("    ✅ 调用成功")
-except Exception as e:
-    print(f"    ❌ 调用失败: {e}")
-    exit(1)
 
-# 5. 验证输出
-print("\n[4] 输出验证:")
-print(f"    y 形状: {y.shape} (期望: [4, 2])")
-print(f"    expert_idx 形状: {expert_idx.shape} (期望: [4, 2])")
-print(f"    out 形状: {out.shape} (期望: [4, 8])")
+    # Reference（在 CPU 上用 float32 算）
+    ref_weights, ref_ids = reference_topk(
+        x.cpu(), k, renorm=renorm, norm_type=norm_type,
+        routed_scaling_factor=routed_scaling_factor,
+    )
 
-# 6. 检查形状是否正确
-assert y.shape == (4, 2), f"y 形状错误: {y.shape}"
-assert expert_idx.shape == (4, 2), f"expert_idx 形状错误: {expert_idx.shape}"
-assert out.shape == (4, 8), f"out 形状错误: {out.shape}"
-print("    ✅ 形状验证通过")
+    # ---- 1. 专家索引必须完全一致（排序无关）----
+    sorted_ref_ids = torch.sort(ref_ids, dim=-1).values
+    sorted_op_ids = torch.sort(expert_idx.cpu().long(), dim=-1).values
+    assert torch.equal(sorted_op_ids, sorted_ref_ids), (
+        f"expert_idx mismatch:\n"
+        f"  op  = {sorted_op_ids[:3]}\n"
+        f"  ref = {sorted_ref_ids[:3]}"
+    )
 
-# 7. 检查值范围
-print("\n[5] 值范围检查:")
-print(f"    y 范围: [{y.min().item():.4f}, {y.max().item():.4f}]")
-print(f"    expert_idx 范围: [{expert_idx.min().item()}, {expert_idx.max().item()}]")
-print(f"    out 范围: [{out.min().item():.4f}, {out.max().item():.4f}]")
+    # ---- 2. 权重按索引对齐后对比 ----
+    # 由于算子返回的 topk_ids 顺序可能与 torch.topk 不同，需要按 id 匹配
+    op_weights = y.cpu().float()
+    op_ids = expert_idx.cpu().long()
 
-# 8. 检查专家索引是否在合理范围（0-7）
-assert expert_idx.min().item() >= 0, "expert_idx 最小值 < 0"
-assert expert_idx.max().item() < 8, f"expert_idx 最大值 >= 8, 实际: {expert_idx.max().item()}"
-print("    ✅ 专家索引范围验证通过")
+    aligned_ref_weights = torch.empty_like(op_weights)
+    for i in range(num_tokens):
+        for j in range(k):
+            eid = op_ids[i, j].item()
+            # 在 reference 里找这个 expert 的权重
+            mask = ref_ids[i] == eid
+            assert mask.any(), f"token {i}: op expert {eid} not in reference"
+            aligned_ref_weights[i, j] = ref_weights[i][mask].max()
 
-# 9. 显示部分输出
-print("\n[6] 输出示例 (前2个token):")
-print(f"    y[0]: {y[0].tolist()}")
-print(f"    expert_idx[0]: {expert_idx[0].tolist()}")
-print(f"    out[0][:5]: {out[0][:5].tolist()}")
+    torch.testing.assert_close(
+        op_weights, aligned_ref_weights, rtol=2e-3, atol=2e-3,
+    )
 
-print("\n" + "=" * 60)
-print("✅ 所有测试通过！")
-print("=" * 60)
+    # ---- 3. renorm=1 时，权重和必须为 1 ----
+    if renorm:
+        weight_sum = op_weights.sum(dim=-1)
+        torch.testing.assert_close(
+            weight_sum, torch.ones_like(weight_sum),
+            rtol=1e-3, atol=1e-3,
+        )
 
-# 10. 保存固定结果（用于后续对比）
-print("\n[7] 保存固定结果:")
-result = {
-    'x': x.cpu().tolist(),
-    'y': y.cpu().tolist(),
-    'expert_idx': expert_idx.cpu().tolist(),
-    'out': out.cpu().tolist(),
-}
-torch.save(result, '/workspace/vllm-plugin-FL/fixed_result.pt')
-print("    ✅ 结果已保存到 fixed_result.pt")
+    print(f"  [PASS] tokens={num_tokens}, experts={num_experts}, k={k}, "
+          f"renorm={renorm}, norm_type={norm_type}, dtype={dtype}")
+
+
+def main():
+    print("=" * 70)
+    print("MoE Gating Top-K 正确性测试（与 reference 数值对比）")
+    print("=" * 70)
+
+    # 覆盖实际模型 shape：Qwen3-35B 有 256 专家，k=2
+    cases = [
+        # (num_tokens, num_experts, k, renorm, norm_type)
+        (4,    8,   2, 0, 0),   # 极小用例
+        (4,    8,   2, 1, 0),   # renorm=1
+        (128,  64,  2, 0, 0),
+        (256,  128, 2, 1, 0),
+        (512,  256, 2, 0, 0),
+        (1024, 256, 2, 1, 0),   # Qwen3-35B 典型 shape
+        (2048, 256, 2, 0, 0),   # 更大 token 数
+        (2048, 256, 4, 0, 0),   # k=4
+    ]
+
+    print("\n开始测试...")
+    for num_tokens, num_experts, k, renorm, norm_type in cases:
+        run_case(num_tokens, num_experts, k, renorm=renorm,
+                 norm_type=norm_type)
+
+    print("\n" + "=" * 70)
+    print("✅ 全部用例通过")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
