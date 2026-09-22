@@ -487,10 +487,19 @@ class AscendCGatedDeltaNet(Qwen3NextGatedDeltaNet):
             # 开关控制（任务书 §3-R5：保留基线回退开关，参考官方 PR #12607）：
             #   VLLM_FL_USE_ACLNN_CHUNK_GDN=1（默认）→ AscendC npu_chunk_gated_delta_rule
             #   VLLM_FL_USE_ACLNN_CHUNK_GDN=0 或 VLLM_FL_DISABLE_ASCENDC_GDN=1 → 回退 Triton 基线
-            use_aclnn = int(os.environ.get("VLLM_FL_USE_ACLNN_CHUNK_GDN", "1"))
-            if os.environ.get("VLLM_FL_DISABLE_ASCENDC_GDN", "0") == "1":
-                use_aclnn = 0
-            if use_aclnn == 1:
+            # 两个开关统一用宽松比较：仅显式 "1" 视为开启，其余取值一律回退 Triton。
+            # 原写法 int() 会在 VLLM_FL_USE_ACLNN_CHUNK_GDN="" 或 "abc" 时抛
+            # ValueError，直接在模型前向路径中断整个推理。
+            _use_env = os.environ.get("VLLM_FL_USE_ACLNN_CHUNK_GDN", "1")
+            use_aclnn = _use_env.strip() == "1"
+            if not use_aclnn and _use_env.strip() != "0":
+                logger.info(
+                    "VLLM_FL_USE_ACLNN_CHUNK_GDN=%r 非预期取值，按回退处理（仅 '1' 开启）",
+                    _use_env,
+                )
+            if os.environ.get("VLLM_FL_DISABLE_ASCENDC_GDN", "0").strip() == "1":
+                use_aclnn = False
+            if use_aclnn:
                 # 可用性判断（PR 评审意见）：算子未注册、dtype 或平台不支持时回退 Triton 基线
                 _asc_ok, _asc_why = _ascendc_chunk_gdn_supported(
                     query_non_spec, key_non_spec, value_non_spec, beta_non_spec,
@@ -501,8 +510,8 @@ class AscendCGatedDeltaNet(Qwen3NextGatedDeltaNet):
                         "AscendC chunk GDN unavailable (%s), fallback to Triton GDN path",
                         _asc_why,
                     )
-                    use_aclnn = 0
-            if use_aclnn == 1:
+                    use_aclnn = False
+            if use_aclnn:
                 # AscendC npu_chunk_gated_delta_rule: TND 布局 + 原生 (Dv,Dk) state + 逐长度
                 actual_seq_lengths = (
                     non_spec_query_start_loc[1:] - non_spec_query_start_loc[:-1]

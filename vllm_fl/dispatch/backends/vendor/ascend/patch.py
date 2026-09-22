@@ -20,10 +20,12 @@ def apply_ascend_patches():
     patch_fused_moe()
     patch_qwen3_5_attention()
     patch_qwen3_6_gdn()
+    patch_qwen3_moe()
     patch_qwen3_mtp()
     patch_graph()
     patch_npugraph_ex()
     patch_dynamo_safe_ops()
+    patch_add_rms_norm_bias()
 
 def patch_mamba_config():
     """Patch HybridAttentionMambaModelConfig for Ascend."""
@@ -84,6 +86,14 @@ def patch_qwen3_6_gdn():
         _do_patch()
     except Exception as e:
         logger.warning("Failed to patch Qwen3.6 GDN AscendC ops: %s", e)
+
+def patch_qwen3_moe():
+    """Patch Qwen3 MoE routing with AscendC MoE Gating Top-K."""
+    try:
+        from .patches.patch_qwen3_moe import apply_patch as _do_patch
+        _do_patch()
+    except Exception as e:
+        logger.warning("Failed to patch Qwen3 MoE: %s", e)
 
 
 def patch_qwen3_mtp():
@@ -285,3 +295,18 @@ def refresh_block_size(vllm_config, block_size = 128):
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info(f"Block size is set to {block_size} if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = block_size
+
+
+def patch_add_rms_norm_bias():
+    """Patch GemmaRMSNorm to use the custom AddRmsNormBias / GemmaRMSNorm ops.
+
+    Falls back to the torch_npu baseline when the custom operator is not
+    available, and can be disabled at runtime with
+    VLLM_FL_DISABLE_ASCENDC_RMSNORM=1.
+    """
+    try:
+        from .patches.patch_add_rms_norm_bias import patch_add_rms_norm_bias as _do_patch
+
+        _do_patch()
+    except Exception as e:
+        logger.warning("Failed to patch AddRmsNormBias ops: %s", e)

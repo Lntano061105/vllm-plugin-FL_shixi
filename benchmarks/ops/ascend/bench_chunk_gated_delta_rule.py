@@ -15,9 +15,16 @@ import statistics
 import time
 
 import torch
-import torch_npu  # noqa: F401  引入 npu 设备接口
 
-import vllm_fl._C_ascend  # noqa: F401  确保算子注册
+# NPU 依赖做成可选：与 tests/ops/ascend/test_chunk_gated_delta_rule.py 保持一致，
+# 无卡环境下给出明确提示而非 Traceback。
+_NPU_IMPORT_ERROR = ""
+try:
+    import torch_npu  # noqa: F401  引入 npu 设备接口
+
+    import vllm_fl._C_ascend  # noqa: F401  确保算子注册
+except Exception as _e:  # pragma: no cover - 环境相关
+    _NPU_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
 
 def make_inputs(T, Nk, Nv, Dk, Dv, B, seed=42):
@@ -36,7 +43,7 @@ def make_inputs(T, Nk, Nv, Dk, Dv, B, seed=42):
     return q, k, v, beta, g, initial_state, actual_seq_lengths, scale
 
 
-def bench_once(args, q, k, v, beta, g, initial_state, actual_seq_lengths, scale):
+def bench_once(q, k, v, beta, g, initial_state, actual_seq_lengths, scale):
     t0 = time.perf_counter()
     torch.ops._C_ascend.npu_chunk_gated_delta_rule(
         q, k, v, beta, initial_state, actual_seq_lengths, g=g, scale_value=scale)
@@ -45,6 +52,12 @@ def bench_once(args, q, k, v, beta, g, initial_state, actual_seq_lengths, scale)
 
 
 def main():
+    # 环境守卫：无 NPU 时明确退出，不伪装成"跑出结果"
+    if _NPU_IMPORT_ERROR:
+        print(f"[SKIP] 无可用 NPU 算子环境（{_NPU_IMPORT_ERROR}）。")
+        print("       本脚本需在昇腾环境运行（先 source set_env.bash 并确认算子已编译）。")
+        return
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-warmup", type=int, default=20)
     ap.add_argument("--n-repeat", type=int, default=100)
@@ -62,10 +75,10 @@ def main():
     # 预热（含 kernel 编译/首次初始化，不计入统计）
     print(f"预热 {args.n_warmup} 次 ...")
     for _ in range(args.n_warmup):
-        bench_once(args, q, k, v, beta, g, initial_state, actual_seq_lengths, scale)
+        bench_once(q, k, v, beta, g, initial_state, actual_seq_lengths, scale)
 
     # 同步 + 重复测试
-    lat = [bench_once(args, q, k, v, beta, g, initial_state, actual_seq_lengths, scale)
+    lat = [bench_once(q, k, v, beta, g, initial_state, actual_seq_lengths, scale)
            for _ in range(args.n_repeat)]
     lat.sort()
     mean_ms = statistics.mean(lat)
