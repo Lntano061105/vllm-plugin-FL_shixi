@@ -1,30 +1,40 @@
+# ---------------------------------------------------------------
+# Python 打包与缓存
+# ---------------------------------------------------------------
 *.egg-info
 __pycache__/
 build/
 dist/
 vllm_fl/_version.py
 
-# Coverage
+# ---------------------------------------------------------------
+# 测试覆盖率
+# ---------------------------------------------------------------
 .coverage
 .coverage.*
 htmlcov/
 coverage*.json
 coverage.xml
 
-# Reports
+# ---------------------------------------------------------------
+# 报告与结果
+# ---------------------------------------------------------------
 report*.json
+benchmark_results/
+fusion_result.json
+test-results-*
+test_concur_server_*.log
 
-# Local Ascend build and runtime artifacts
+# ---------------------------------------------------------------
+# Ascend 构建产物与运行时文件
+# ---------------------------------------------------------------
 csrc/ascend/build_out/
+build_out/
 vllm_fl/_cann_ops_custom/
 vllm_fl/*.so
-benchmark_results/
-fusion_result.json
-test_concur_server_*.log
-test-results-*
-build_out/
 *.so
+
+# ---------------------------------------------------------------
+# 日志
+# ---------------------------------------------------------------
 *.log
-fusion_result.json
-benchmark_results/
-vllm_fl/_cann_ops_custom/

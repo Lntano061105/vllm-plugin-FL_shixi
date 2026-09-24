@@ -91,6 +91,60 @@ _REQUIRED_OPS = (
 )
 
 
+def _soc_is_ascend950():
+    """判断当前设备是否为 ascend950（唯一支持 FP32 state 的平台）。
+
+    查询失败时保守返回 False（按 ascend910b 处理，仅允许 bf16 state）。
+    """
+    names = []
+    try:
+        names.append(str(torch.npu.get_device_name(0)))
+    except Exception:
+        pass
+    if not names:
+        try:
+            import torch_npu  # noqa: F401
+
+            names.append(str(torch_npu.npu.get_device_name(0)))
+        except Exception:
+            pass
+    for name in names:
+        if "950" in name.lower():
+            return True
+    return False
+
+
+def _ascendc_chunk_gdn_supported(query, key, value, beta, initial_state, g):
+    """判断当前输入能否走 AscendC 完整版 chunk GDR 算子；返回 (是否可用, 原因)。
+
+    判据与算子侧原型定义 / tiling 的校验保持一致，任一条件不满足即回退 Triton 基线：
+      1) 算子已注册（未编译或 .so 未加载时 hasattr 为 False）
+      2) dtype 契约：query / key / value / beta 为 bf16；g（可选）为 fp32
+      3) 平台 x state dtype：ascend910b 仅支持 bf16 state，FP32 state 需 ascend950
+    """
+    try:
+        if not hasattr(torch.ops._C_ascend, "npu_chunk_gated_delta_rule"):
+            return False, "operator npu_chunk_gated_delta_rule not registered"
+    except Exception as exc:  # 扩展未加载等
+        return False, "op registration check failed: %s" % exc
+
+    if query.dtype != torch.bfloat16 or key.dtype != torch.bfloat16:
+        return False, "query/key dtype must be bf16, got %s/%s" % (query.dtype, key.dtype)
+    if value.dtype != torch.bfloat16 or beta.dtype != torch.bfloat16:
+        return False, "value/beta dtype must be bf16, got %s/%s" % (value.dtype, beta.dtype)
+    if g is not None and g.dtype != torch.float32:
+        return False, "g dtype must be fp32, got %s" % g.dtype
+
+    state_dtype = initial_state.dtype
+    if state_dtype not in (torch.bfloat16, torch.float32):
+        return False, "initial_state dtype unsupported: %s" % state_dtype
+    if state_dtype == torch.float32 and not _soc_is_ascend950():
+        return False, "fp32 state requires ascend950 (ascend910b supports bf16 only)"
+
+    return True, ""
+
+
+
 def _bootstrap_custom_op_env() -> bool:
     """Make the packaged CANN custom-op package discoverable at runtime.
 
@@ -430,31 +484,85 @@ class AscendCGatedDeltaNet(Qwen3NextGatedDeltaNet):
 
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            # Chunked prefill stays on the (Ascend Triton) chunk kernel, which
-            # uses the FLA (Hv, Dk, Dv) state layout: transpose at the boundary.
-            initial_state = (
-                ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
-            )
-            initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = _qwen3_next_lib.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
-                head_first=False,
-                use_qk_l2norm_in_kernel=True,
-            )
-            # Init cache
-            ssm_state[non_spec_state_indices_tensor] = (
-                last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-            )
+            # 开关控制（任务书 §3-R5：保留基线回退开关，参考官方 PR #12607）：
+            #   VLLM_FL_USE_ACLNN_CHUNK_GDN=1（默认）→ AscendC npu_chunk_gated_delta_rule
+            #   VLLM_FL_USE_ACLNN_CHUNK_GDN=0 或 VLLM_FL_DISABLE_ASCENDC_GDN=1 → 回退 Triton 基线
+            # 两个开关统一用宽松比较：仅显式 "1" 视为开启，其余取值一律回退 Triton。
+            # 原写法 int() 会在 VLLM_FL_USE_ACLNN_CHUNK_GDN="" 或 "abc" 时抛
+            # ValueError，直接在模型前向路径中断整个推理。
+            _use_env = os.environ.get("VLLM_FL_USE_ACLNN_CHUNK_GDN", "1")
+            use_aclnn = _use_env.strip() == "1"
+            if not use_aclnn and _use_env.strip() != "0":
+                logger.info(
+                    "VLLM_FL_USE_ACLNN_CHUNK_GDN=%r 非预期取值，按回退处理（仅 '1' 开启）",
+                    _use_env,
+                )
+            if os.environ.get("VLLM_FL_DISABLE_ASCENDC_GDN", "0").strip() == "1":
+                use_aclnn = False
+            if use_aclnn:
+                # 可用性判断（PR 评审意见）：算子未注册、dtype 或平台不支持时回退 Triton 基线
+                _asc_ok, _asc_why = _ascendc_chunk_gdn_supported(
+                    query_non_spec, key_non_spec, value_non_spec, beta_non_spec,
+                    ssm_state[non_spec_state_indices_tensor], g_non_spec,
+                )
+                if not _asc_ok:
+                    logger.info(
+                        "AscendC chunk GDN unavailable (%s), fallback to Triton GDN path",
+                        _asc_why,
+                    )
+                    use_aclnn = False
+            if use_aclnn:
+                # AscendC npu_chunk_gated_delta_rule: TND 布局 + 原生 (Dv,Dk) state + 逐长度
+                actual_seq_lengths = (
+                    non_spec_query_start_loc[1:] - non_spec_query_start_loc[:-1]
+                ).to(torch.int32)
+                # AscendC 算子内部不做 q/k L2 归一化，需外部先做
+                q_asc = l2norm_fwd(query_non_spec)
+                k_asc = l2norm_fwd(key_non_spec)
+                # 原生 (Dv,Dk) 布局，不转置；clone 后清零无初始 state 的序列
+                initial_state = ssm_state[non_spec_state_indices_tensor].clone()
+                initial_state[~has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = torch.ops._C_ascend.npu_chunk_gated_delta_rule(
+                    q_asc.squeeze(0),
+                    k_asc.squeeze(0),
+                    value_non_spec.squeeze(0),
+                    beta_non_spec.squeeze(0),
+                    initial_state,
+                    actual_seq_lengths,
+                    g=g_non_spec.squeeze(0),
+                    scale_value=key_non_spec.shape[-1] ** -0.5,
+                )
+                core_attn_out_non_spec = core_attn_out_non_spec.unsqueeze(0)
+                # Init cache（AscendC 输出原生 (Dv,Dk) 布局，不转置）
+                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
+            else:
+                # Triton 回退（基线 chunk_gated_delta_rule，FLA (Hv,Dk,Dv) 布局，边界转置）
+                initial_state = (
+                    ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
+                )
+                initial_state[~has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = _qwen3_next_lib.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc,
+                    head_first=False,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                # Init cache（Triton 输出 FLA (Hv,Dk,Dv)，写回需转置）
+                ssm_state[non_spec_state_indices_tensor] = (
+                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = _build_actual_seq_lengths(
                 non_spec_query_start_loc, attn_metadata.num_decodes
