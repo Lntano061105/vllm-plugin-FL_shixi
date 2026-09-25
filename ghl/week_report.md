@@ -167,3 +167,56 @@ Qwen3.6-27B/35B 模型权重不在本机（本地缓存仅有 Qwen3-4B），模�
 1. PR 提交待项目组确认基线/方式（最小改动集合已就绪，merge-base 906fa07），未提交。
 2. 27B graph 基线在本环境取不到数（5 次 PIECEWISE 全部 OOM，累计 FULL 1 + PIECEWISE 9 次失败），需确认可用配置后再补测。
 3. 27B 模型级 AscendC 慢于 Triton 的方向性差异仍待定位（疑似 decode 路径 state 布局转换），需无 profiler 对照 + 重复数据。
+
+---
+
+## 第 6 周（2026-09-12 ~ 2026-09-25，续写于 2026-09-25）
+
+人员：龚昊磊（容器用户名：ghl）
+
+本周小结：
+本周完成第 5 周"下周计划"的第 2、3 两项目标。PR 以 fork 流程提交（提交 `2689811`，19 文件 / +3615 行 / 0 删除，推送到 `ww1157/vllm-plugin-FL_shixi` 的 `ghl/fused_gdn_gating` 分支，向主仓库 `main` 开 PR #7），偏差原因与证据见"已完成工作 1"。27B/35B AscendC vs Triton 无 profiler 对照 12 个 run 全部完成（每条路径 3 次），结论：27B AscendC 吞吐 6.72 tok/s（+7.8%）、TPOT 148.28 ms（−7.2%）优于 Triton 的 6.23 tok/s / 159.76 ms；35B AscendC 5.60 tok/s（+2.6%）、TPOT 177.82 ms（−2.5%）优于 Triton 的 5.46 tok/s / 182.38 ms——两条模型上 AscendC 均优于 Triton，与算子级方向一致。此前"27B 模型级 AscendC 慢于 Triton"确认为 2026-08-25 那次 profiler run 的口径问题，关闭 profiler 后不复现，故原计划中"27B 模型级差异定位"的前提不成立。另完成计数钩子向 main 版的移植与验证。
+
+已完成工作：
+1. 最终 PR 提交（第 5 周计划第 2 项，完成）：
+    - PR #7 `ww1157:ghl/fused_gdn_gating → Lntano061105:main`（open），提交 `2689811`（author/committer `ghl <ghl@local>`），相对 upstream main：**19 文件 / +3615 行 / 0 删除**（18 新增 + 1 修改）。
+    - 提交内容：① `tests/ops/ascend/test_fused_gdn_gating.py` 算子级固定测试 25 例（8 对比 PyTorch 参考 + 8 对比 vLLM Triton 基线 + 1 softplus 越阈退化路径 + 8 TORCH_CHECK 异常分支；固定 NUM_HEADS=32，token 1/4/16/64，bf16/fp16，rtol=atol=1e-2）；② main 版 `patch_qwen3_6_gdn.py`（644 行）基础上新增默认关闭的 `VLLM_FL_GDN_COUNT_FILE` 调用计数钩子（+40 行 → 684 行）；③ `docs/intern_ops/fused_gdn_gating_W1.md`；④ `ghl/` 周报与技术报告、答辩材料。
+    - 未重复提交已在 main 中且与本地逐文件一致的内容：算子源码 14 文件、`csrc/ascend/torch_binding.cpp` 的 schema 注册、`csrc/ascend/build_aclnn.sh` 构建清单；未覆盖或删除任何同事已合并的算子、测试与文档（对比方案见下）。
+    - **提交方式偏差与依据**：提交说明（`ghl/git_method.md`）要求把 `origin` 指向 `git@github.com:Lntano061105/vllm-plugin-FL_shixi.git` 后直推。实测当前账号（GitHub `ww1157`）对该仓库无写权限（`ERROR: Permission to Lntano061105/vllm-plugin-FL_shixi.git denied to ww1157`），故按说明中"如遇冲突或权限问题，请在群里反馈"处理，并参照仓库已有做法（PR #1/#2/#4/#5 分别来自 `putongmofashi`/`PerseusM34`/`zhen-and-ying`/`happydayday` 的 fork）改为 fork 流程。
+    - **取提交范围前的核对（避免破坏他人成果）**：本地 HEAD `a3644b2` 是 upstream main（`819cd4a`）的祖先，落后 34 个提交；若按字面执行 `git add -A` 提交，相对 main 将是 842 新增 / **65 删除** / 9 改写——删除项包括同事已合并的 `csrc/ascend/attention/chunk_gated_delta_rule/` 整个算子、`docs/intern_ops/` 全部报告、`tests/ops/ascend/test_chunk_gated_delta_rule.py` 等，改写项包括 `torch_binding.cpp`、`build_aclnn.sh`、`patch.py`、`patch_qwen3_6_gdn.py`(644→577) 等，另有 809 个 `vllm_fl/_cann_ops_custom/vendors/**` 构建产物与 `.so` 文件会被一并提交。故改为以 upstream main 为基线、只取本人 4 项内容的受限提交（工作树与真实索引未改动，用临时索引 + `git commit-tree` 构造）。
+2. 27B/35B AscendC vs Triton 无 profiler 对照（第 5 周计划第 3 项，完成）：
+    - 口径与 2026-08-25 模型级 1K/1K 验证一致（eager + chunked、`--cases "1024,1024,1"`、单请求、27B TP1/gmem0.9/device 4、35B TP2/gmem0.7/device 4,5），仅加 `--bench-profile false --skip-analyse`，规避 27B 上 profiler 导出卡死（见第 4 周所遇问题 2）。Triton 路径由外层 `export VLLM_FL_DISABLE_ASCENDC_GDN=1` 切换（子进程继承）。
+    - 驱动脚本 `/workspace/scripts/ghl/ctrl_20260925.sh`（12 个 run：27B AscendC×3 → 27B Triton×3 → 35B AscendC×3 → 35B Triton×3）（驱动脚本保留；原始 run 数据与跑批日志已按项目要求于 2026-09-25 删除）；12 个 run 于 2026-09-25 03:32~05:58 全部完成，全部 rc=0、Successful=1、生成 1024 tokens。
+    - 单 run 数据（吞吐 tok/s / TPOT ms）：
+
+      | 分组 | r1 | r2 | r3 |
+      |---|---|---|---|
+      | 27B AscendC | 6.51 / 152.96 | 6.67 / 149.34 | 6.98 / 142.55 |
+      | 27B Triton | 6.25 / 159.27 | 6.16 / 161.71 | 6.29 / 158.30 |
+      | 35B AscendC | 5.56 / 179.07 | 5.64 / 176.35 | 5.59 / 178.05 |
+      | 35B Triton | 5.35 / 185.95 | 5.49 / 181.15 | 5.53 / 180.05 |
+
+    - 均值 ± 标准差（n=3）：
+
+      | 分组 | 吞吐 (tok/s) | TTFT (ms) | TPOT (ms) |
+      |---|---|---|---|
+      | 27B AscendC | **6.72 ± 0.24** | 819.69 ± 8.40 | **148.28 ± 5.28** |
+      | 27B Triton | 6.23 ± 0.07 | 901.67 ± 12.98 | 159.76 ± 1.76 |
+      | 35B AscendC | **5.60 ± 0.04** | 1050.32 ± 13.84 | **177.82 ± 1.37** |
+      | 35B Triton | 5.46 ± 0.09 | 1105.74 ± 11.76 | 182.38 ± 3.14 |
+
+    - 比值（AscendC/Triton）：27B 吞吐 1.078x / TTFT 0.909x / TPOT 0.928x；35B 吞吐 1.026x / TTFT 0.950x / TPOT 0.975x。
+    - **结论**：① 27B 与 35B 上 AscendC 均优于 Triton（吞吐 +7.8% / +2.6%，TPOT −7.2% / −2.5%，TTFT −9.1% / −5.0%），与算子级方向一致；② 此前"27B 模型级 AscendC 慢于 Triton"确认为 2026-08-25 那次 profiler run 的口径问题（当次为 `--bench-profile true` 取证 run，且 profiler 导出卡死未测得 TTFT/TPOT），关闭 profiler 后不复现，故原计划"27B 模型级差异定位（decode 路径 state 布局转换等）"的前提不成立；③ 模型级增益（2.6%~7.8%）远小于算子级（2.3~3.8 倍），与 Profiler 证据一致——`FusedGdnGating` 仅占 device 耗时 0.448%，GDN 路径算子合计约 3.7%，端到端影响只能到几个百分点量级，该算子不是端到端瓶颈；④ 与 8/25 单次数据互证良好（27B Triton 6.10→6.23 tok/s、TPOT 163.15→159.76 ms；35B AscendC 5.68→5.60、Triton 5.29→5.46），各分组吞吐与 TPOT 区间互不重叠，方向结论稳定。
+    - 注：本批次未采集 profiler 产物（`api_statistic.csv` / `trace_view.json`），结论③引用 2026-08-25 27B AscendC 取证 run 的 `op_statistic.csv`。
+3. 计数钩子向 main 版的移植与验证：未用本地 577 行裁剪版覆盖 main 的 644 行版本，而是移植（新增 `import atexit` + `_install_gdn_gating_counter()` + `patch_qwen3_6_gdn()` 中一行调用，684 行），并单独验证——单进程 2050 次调用精确计数（1024 + 1024 + 2），未设置环境变量时为零开销 no-op。附：`week_save.md §1.4` 中"2050 次调用 → 文件中 1024 + 1026"的预期描述不准确（实际每满 1024 次 flush 一次），钩子行为本身正确。
+4. 27B graph 基线重测（新增，2026-09-25，**首次取到有效数据**）：按 `ghl/27b_graph_script.md` 口径（graph + PIECEWISE、cases `1024,1024,128`、concurrency 64、max-num-seqs 64、max-model-len 8192、TP4、gmem0.6、devices 0,1,2,3、端口 8113）06:26~07:16 重测 4 次，第 3 次成功：**128/128 全部成功、Output 吞吐 496.66 tok/s（峰值 704.00）、TPOT mean/median/P99 = 119.87/124.07/127.06 ms、TTFT mean/median/P99 = 8231.68/2813.94/27323.84 ms、duration 263.91 s**，成功 run 的 `server.log` 无任何错误行。另两次失败形态**均非 OOM**：尝试 1 为 `aicore timeout`（`retCode=0x25`、`rtMemcpyAsync ... 507014`，18 行）导致 Worker 进程退出；尝试 2 为 EngineCore 连续 4 分钟 `No available shared memory broadcast block found in 60 seconds` 后 `fatal error`。对照原始基线记录（FULL、65/128、266.38 tok/s、TPOT median 209.45 ms）：cudagraph 模式不同（FULL vs PIECEWISE），不宜严格对比；同模式参照 35b_graph PIECEWISE 重测（9/10：128/128、322.95 tok/s、TPOT median 192.32 ms）与 27b_eager 重测（9/10：128/128、288.20 tok/s、216.73 ms），graph PIECEWISE 优于 eager、27B 优于 35B，方向合理。**结论修订：原"27B graph 在本环境不可复现"改为"可复现但极不稳定"**——累计 13 次尝试（FULL 1 + PIECEWISE 12）成功 1 次，失败原因不唯一（NPU OOM / aicore timeout / 引擎挂死）。归档：`/workspace/results/ghl/20260925_27b_graph重测/`（`result_summary.md` + 驱动脚本；原始 run 数据与跑批日志已按项目要求于 2026-09-25 删除）。
+
+下周计划：
+1. PR #7 跟进评审意见，按需修改并更新提交。
+2. 27B graph 基线：如需稳定数据，待项目组确认可用配置（capture 尺寸 / max-num-seqs / max-model-len）后补测，或按同模式（PIECEWISE）重试以取得多次重复数据；如要求与原始记录严格对比，需补 FULL 模式。
+3. 文档维护（2026-09-25 已完成）：`ghl/ghl_report.md`（§5.2/§6.2/§7/§8 与附录 B/C）与 `ghl/ghl_reply.md` 全文已同步本次重复对照结论与 PR #7 提交状态；后续如有新数据再迭代。
+
+所遇问题：
+1. 提交权限：账号 `ww1157` 对 `Lntano061105/vllm-plugin-FL_shixi` 无写权限，本次按仓库既有做法改走 fork 提 PR；若项目组要求直推主仓库，需要 collaborator 权限，或把容器内公钥加为该仓库 Deploy key（指纹 `SHA256:HcQfgrhjaqGEfI0shP0SSOvpSIdklZlU1SRRu1PKyzo`）。
+2. 27B graph 基线在本环境**极不稳定**：累计 13 次尝试（FULL 1 + PIECEWISE 12）仅成功 1 次（2026-09-25 第 3 次尝试取得有效数据：128/128、496.66 tok/s、TPOT median 124.07 ms）；失败原因不唯一——此前 10 次为 NPU OOM（`Tried to allocate 650 MiB`），2026-09-25 的两次分别为 `aicore timeout` 与 EngineCore 因 `shm_broadcast` 广播块不可用而挂死。要稳定取数需项目组确认配置（capture 尺寸 / max-num-seqs / max-model-len），或按"重试至首次成功并注明尝试次数"的口径记录。
+3. 提交作者标识为 `ghl <ghl@local>`（沿用仓库中 `kjh@local` 的做法），未关联 GitHub 账号；如需关联，提供邮箱后重建提交并重推即可（PR 尚在评审期，代价最低）。
