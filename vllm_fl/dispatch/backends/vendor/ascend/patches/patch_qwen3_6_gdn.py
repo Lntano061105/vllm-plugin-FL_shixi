@@ -61,6 +61,7 @@ existing Triton path is kept. Set ``VLLM_FL_DISABLE_ASCENDC_GDN=1`` to
 force the Triton path.
 """
 
+import atexit
 import logging
 import math
 import os
@@ -89,6 +90,44 @@ _REQUIRED_OPS = (
     "npu_gemma_rms_norm",
     "npu_add_rms_norm_bias",
 )
+
+
+def _install_gdn_gating_counter() -> None:
+    """Env-gated invocation counter for ``npu_fused_gdn_gating``.
+
+    When ``VLLM_FL_GDN_COUNT_FILE`` points at a writable path, every real
+    call of the AscendC gating op is tallied and appended to that file as
+    ``<pid> <count>`` lines (flushed every 1024 calls and at exit).  Used to
+    prove the op actually executes inside the model inference path (task
+    requirement), including multi-process / multi-card TP setups where a
+    wrapper installed in the driver process would not see the calls.  The
+    wrap is a no-op unless the env var is set, so the normal patch behavior
+    is unchanged.
+    """
+    count_file = os.environ.get("VLLM_FL_GDN_COUNT_FILE", "")
+    if not count_file:
+        return
+    orig = torch.ops._C_ascend.npu_fused_gdn_gating
+    state = {"count": 0}
+
+    def _flush() -> None:
+        if state["count"]:
+            try:
+                with open(count_file, "a") as fh:
+                    fh.write(f"{os.getpid()} {state['count']}\n")
+            except OSError:  # e.g. disk full during shutdown; never fail a call
+                pass
+            state["count"] = 0
+
+    def _counting_op(*args, **kwargs):
+        state["count"] += 1
+        if state["count"] % 1024 == 0:
+            _flush()
+        return orig(*args, **kwargs)
+
+    torch.ops._C_ascend.npu_fused_gdn_gating = _counting_op
+    atexit.register(_flush)
+    logger.info("npu_fused_gdn_gating invocation counter -> %s", count_file)
 
 
 def _soc_is_ascend950():
@@ -632,6 +671,7 @@ def patch_qwen3_6_gdn() -> bool:
     if not _ascendc_ops_available():
         return False
 
+    _install_gdn_gating_counter()
     Qwen3NextGatedDeltaNet.get_state_shape = AscendCGatedDeltaNet.get_state_shape
     Qwen3NextGatedDeltaNet._forward_core = AscendCGatedDeltaNet._forward_core
     _patch_mamba_cache_dense_layout()
